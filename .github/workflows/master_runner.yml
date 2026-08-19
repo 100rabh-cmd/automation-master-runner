@@ -7,7 +7,7 @@ on:
   workflow_dispatch: # Allows manual trigger button in GitHub UI
 
 permissions:
-  contents: write # Allows saving updated last_seen JSON files back to repo
+  contents: write # Allows saving updated last_seen JSON state files back to the repo
 
 jobs:
   run-master:
@@ -27,9 +27,16 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Install Playwright
+    - name: Install Playwright Browsers
       run: |
         playwright install --with-deps chromium
+
+    # Dynamically generates credentials.json for Google Sheets integration
+    - name: Create credentials.json
+      env:
+        CREDENTIALS_JSON: ${{ secrets.CREDENTIALS_JSON }}
+      run: |
+        python -c "import os; open('credentials.json', 'w').write(os.environ['CREDENTIALS_JSON'])"
 
     - name: Execute Master Runner Script
       env:
@@ -37,11 +44,16 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         TELEGRAM_BOT_TOKEN_ANN: ${{ secrets.TELEGRAM_BOT_TOKEN_ANN }}
         TELEGRAM_CHAT_ID_ANN: ${{ secrets.TELEGRAM_CHAT_ID_ANN }}
-        EMAIL_USER: ${{ secrets.EMAIL_USER }}
-        EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+        TELEGRAM_BOT_TOKEN_RES: ${{ secrets.TELEGRAM_BOT_TOKEN_RES }}
+        TELEGRAM_CHAT_ID_RES: ${{ secrets.TELEGRAM_CHAT_ID_RES }}
+        TELEGRAM_BOT_TOKEN_CE: ${{ secrets.TELEGRAM_BOT_TOKEN_CE }}
+        TELEGRAM_CHAT_ID_CE: ${{ secrets.TELEGRAM_CHAT_ID_CE }}
+        TELEGRAM_BOT_TOKEN_CC: ${{ secrets.TELEGRAM_BOT_TOKEN_CC }}
+        TELEGRAM_CHAT_ID_CC: ${{ secrets.TELEGRAM_CHAT_ID_CC }}
       run: |
         python master_runner.py
 
+    # Persists updated state files back to GitHub to prevent duplicate alerts
     - name: Commit updated state JSON files
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
