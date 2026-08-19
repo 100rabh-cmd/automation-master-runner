@@ -27,9 +27,6 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    - name: Install Playwright Browsers
-      run: |
-        playwright install --with-deps chromium
 
     # Dynamically generates credentials.json for Google Sheets integration
     - name: Create credentials.json
