@@ -1,0 +1,49 @@
+name: Master Automation Runner
+
+on:
+  schedule:
+    # Runs at minute 0 of every hour (UTC)
+    - cron: '0 * * * *'
+  workflow_dispatch: # Allows manual trigger button in GitHub UI
+
+permissions:
+  contents: write # Allows saving updated last_seen JSON files back to repo
+
+jobs:
+  run-master:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Install Playwright
+      run: |
+        playwright install --with-deps chromium
+
+    - name: Execute Master Runner Script
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_BOT_TOKEN_ANN: ${{ secrets.TELEGRAM_BOT_TOKEN_ANN }}
+        TELEGRAM_CHAT_ID_ANN: ${{ secrets.TELEGRAM_CHAT_ID_ANN }}
+        EMAIL_USER: ${{ secrets.EMAIL_USER }}
+        EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+      run: |
+        python master_runner.py
+
+    - name: Commit updated state JSON files
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "auto: update last_seen state files [skip ci]"
+        file_pattern: "last_seen_*.json"
