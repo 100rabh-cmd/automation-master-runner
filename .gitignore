@@ -1,0 +1,10 @@
+# Ignore sensitive credential files
+.env
+credentials.json
+
+# Ignore temporary/log files
+*.log
+__pycache__/
+*.pyc
+
+# Do NOT ignore last_seen_*.json (Git needs to track these to prevent duplicates)
