@@ -59,7 +59,14 @@ def get_watchlist_metrics():
     metrics_map = {}
     try:
         sheet = init_google_sheet(WATCHLIST_TAB)
-        records = sheet.get_all_records()
+        rows = sheet.get_all_values()
+        data_rows = rows[1:]  # Excludes header row
+
+        # Safely extract Active stock names from Column C (index 2)
+        active_stocks = [
+            row[2].strip() for row in data_rows 
+            if len(row) > 2 and row[2].strip() and (len(row) <= 1 or row[1].strip().lower() == 'yes')
+        ]
         for r in records:
             ticker = str(r.get('Ticker', '')).strip().upper()
             stock_name = str(r.get('Stock Name', r.get('Company Name', ''))).strip().upper()
