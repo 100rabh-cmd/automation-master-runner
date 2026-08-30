@@ -1,18 +1,15 @@
 import os
-from dotenv import load_dotenv
-import json
-import re
-from datetime import datetime
-import requests
-from bs4 import BeautifulSoup
-import gspread
 import time
-from oauth2client.service_account import ServiceAccountCredentials
+import json
+import logging
+import requests
+import gspread
+from datetime import datetime
+from dotenv import load_dotenv
 
 load_dotenv()
 
 # --- CONFIGURATION ---
-SCREENER_URL = "https://www.screener.in/announcements/user-filters/223295/"
 STATE_FILE = "last_seen_expansions.json"
 CREDENTIALS_FILE = "credentials.json"
 SHEET_NAME = "StockPulse Tracker"
@@ -22,16 +19,57 @@ WATCHLIST_TAB = "Watchlist"
 TELEGRAM_BOT_TOKEN_CE = os.getenv("TELEGRAM_BOT_TOKEN_CE")
 TELEGRAM_CHAT_ID_CE = os.getenv("TELEGRAM_CHAT_ID_CE")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Cookie": "csrftoken=PNaWmraZrRgc9NfKH57aPQhp3ngDTVt9; sessionid=k8wmkhm9isrfjj64sivgr4gl11k5b4s5"
-}
+# Expansion Keywords to match BSE Announcement Headlines & Summaries
+EXPANSION_KEYWORDS = [
+    "expansion", "capacity", "commercial production",
+    "commissioning", "new plant", "new facility",
+    "setting up", "capacity addition", "greenfield", "brownfield"
+]
 
-def init_google_sheet(tab_name):
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
-    client = gspread.authorize(creds)
-    return client.open(SHEET_NAME).worksheet(tab_name)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+def get_watchlist(gc):
+    """Fetches active stocks and their cached metrics from Watchlist tab."""
+    try:
+        sh = gc.open(SHEET_NAME)
+        ws = sh.worksheet(WATCHLIST_TAB)
+        records = ws.get_all_records()
+        
+        watchlist = {}
+        for r in records:
+            active_flag = str(r.get('Active', 'yes')).strip().lower()
+            if active_flag in ['yes', 'true', '1']:
+                ticker = str(r.get('Ticker', '')).strip()
+                clean_code = ticker.replace("BOM:", "").replace("NSE:", "").strip()
+                
+                if clean_code.isdigit():
+                    watchlist[clean_code] = {
+                        "company": str(r.get('Stock Name', r.get('Company Name', 'Unknown'))).strip(),
+                        "ticker_formatted": f"BOM:{clean_code}",
+                        "price": str(r.get('Current Price', 'N/A')).strip(),
+                        "mcap": str(r.get('Market Cap (Cr)', 'N/A')).strip(),
+                        "pe": str(r.get('P/E Ratio', 'N/A')).strip()
+                    }
+        return watchlist
+    except Exception as e:
+        logging.error(f"Error reading Watchlist tab: {e}")
+        return {}
+
+def fetch_bse_announcements(scrip_cd):
+    """Fetches announcements directly from BSE API for a specific scrip code."""
+    url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://www.bseindia.com/',
+        'Accept': 'application/json, text/plain, */*'
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.raise_for_status()
+        return res.json().get("Table", [])
+    except Exception as e:
+        logging.error(f"Failed to fetch BSE announcements for scrip {scrip_cd}: {e}")
+        return []
 
 def load_last_seen():
     if os.path.exists(STATE_FILE):
@@ -44,222 +82,74 @@ def load_last_seen():
 
 def save_last_seen(seen_set):
     with open(STATE_FILE, "w") as f:
-        json.dump(list(seen_set)[-500:], f)
-
-def format_ticker(symbol_or_code):
-    code = str(symbol_or_code).strip().upper()
-    if code.isdigit():
-        return f"BOM:{code}"
-    elif code and not (code.startswith("BOM:") or code.startswith("NSE:")):
-        return f"NSE:{code}"
-    return code
-
-def get_watchlist_metrics():
-    """Fetches pre-calculated Stock Metrics directly from Watchlist tab."""
-    metrics_map = {}
-    try:
-        sheet = init_google_sheet(WATCHLIST_TAB)
-        rows = sheet.get_all_values()
-        data_rows = rows[1:]  # Excludes header row
-
-        # Safely extract Active stock names from Column C (index 2)
-        active_stocks = [
-            row[2].strip() for row in data_rows 
-            if len(row) > 2 and row[2].strip() and (len(row) <= 1 or row[1].strip().lower() == 'yes')
-        ]
-        for r in records:
-            ticker = str(r.get('Ticker', '')).strip().upper()
-            stock_name = str(r.get('Stock Name', r.get('Company Name', ''))).strip().upper()
-            
-            data = {
-                "price": str(r.get('Current Price', 'N/A')).strip(),
-                "mcap": str(r.get('Market Cap (Cr)', 'N/A')).strip(),
-                "pe": str(r.get('P/E Ratio', 'N/A')).strip()
-            }
-            if ticker:
-                metrics_map[ticker] = data
-                metrics_map[ticker.replace("BOM:", "").replace("NSE:", "")] = data
-            if stock_name:
-                metrics_map[stock_name] = data
-    except Exception as e:
-        print(f"Watchlist lookup notice: {e}")
-    return metrics_map
-
-def fetch_bse_live_metrics(scrip_code):
-    """Fallback fetch directly from BSE API for SME/untracked stocks."""
-    clean_code = str(scrip_code).replace("BOM:", "").replace("NSE:", "").strip()
-    price, mcap, pe = "N/A", "N/A", "N/A"
-    
-    if not clean_code.isdigit():
-        return price, mcap, pe
-
-    try:
-        url_hdr = f"https://api.bseindia.com/BseIndiaAPI/api/GetScripHeaderData/w?scripcode={clean_code}"
-        res_hdr = requests.get(url_hdr, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://www.bseindia.com/"}, timeout=5)
-        if res_hdr.status_code == 200:
-            hdr_data = res_hdr.json().get("Header", {})
-            price = str(hdr_data.get("LTP", hdr_data.get("PrevClose", "N/A")))
-            mcap = str(hdr_data.get("McapFull", "N/A"))
-            pe = str(hdr_data.get("PE", "N/A"))
-    except Exception:
-        pass
-
-    return price, mcap, pe
+        json.dump(list(seen_set)[-800:], f)
 
 def send_telegram_alert(company, ticker, title, pdf_link, price="N/A", mcap="N/A", pe="N/A"):
-    if not TELEGRAM_BOT_TOKEN_CE or TELEGRAM_BOT_TOKEN_CE == "YOUR_TELEGRAM_BOT_TOKEN_CE":
-        print("Telegram skipped: Bot token not configured.")
+    if not TELEGRAM_BOT_TOKEN_CE or not TELEGRAM_CHAT_ID_CE:
+        logging.warning("Telegram skipped: Bot token or chat ID not set.")
         return
-    
-    ticker_display = f" (`{ticker}`)" if ticker else ""
-    
-    snapshot_block = (
-        f"📊 *Stock Snapshot:*\n"
-        f"• *Price:* ₹{price} | *Mcap:* ₹{mcap} Cr | *P/E:* {pe}\n\n"
-    )
 
-    message = (
-        f"🏭 *New Capacity Expansion Alert!*\n\n"
-        f"📌 *Company:* {company}{ticker_display}\n\n"
-        f"{snapshot_block}"
-        f"📝 *Details:* {title}\n\n"
-        f"📄 *PDF Document:* {pdf_link}\n\n"
+    snapshot = f"• <b>Price:</b> ₹{price} | <b>Mcap:</b> ₹{mcap} Cr | <b>P/E:</b> {pe}\n\n" if price != "N/A" else ""
+
+    text = (
+        f"🏭 <b>New Capacity Expansion Alert!</b>\n\n"
+        f"📌 <b>Company:</b> {company} (<code>{ticker}</code>)\n\n"
+        f"📊 <b>Stock Snapshot:</b>\n{snapshot}"
+        f"📝 <b>Headline:</b> {title}\n\n"
+        f"📄 <b>PDF Document:</b> {pdf_link}\n\n"
         f"📲 Follow: @financewith100rabh"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_CE}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID_CE,
-        "text": message,
-        "parse_mode": "Markdown"
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            print(f"Telegram alert sent successfully for {company}.")
-        else:
-            print(f"Failed to send Telegram alert: {response.text}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Telegram error: {e}")
+        logging.error(f"Telegram error: {e}")
 
-def normalize_details(text):
-    """Removes dynamic relative date prefixes (e.g. 'Today ', 'Yesterday ', '7 Aug ago ')."""
-    cleaned = re.sub(r'^(Today|Yesterday|[A-Za-z]{3}\s+\d{1,2},\s+\d{4}|\d+\s+[A-Za-z]+\s+ago)\s*', '', text, flags=i) if (i := re.IGNORECASE) else text
-    return re.sub(r'\s+', ' ', cleaned).strip()
+def run_expansion_tracker():
+    gc = gspread.service_account(filename=CREDENTIALS_FILE)
+    sh = gc.open(SHEET_NAME)
+    expansion_sheet = sh.worksheet(EXPANSION_TAB)
 
-def fetch_expansion_announcements():
-    print(f"[{datetime.now()}] Fetching updates from Screener filter...")
-    try:
-        response = requests.get(SCREENER_URL, headers=HEADERS, timeout=15)
-        if response.status_code != 200:
-            print(f"Failed to fetch page. Status code: {response.status_code}")
-            return []
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        updates = []
-        seen_in_page = set()
-
-        cards = soup.find_all(['div', 'article', 'li'], class_=lambda x: x and ('card' in x or 'announcement' in x))
-        if not cards:
-            cards = soup.find_all('div', class_='flex')
-
-        for card in cards:
-            company_elem = card.find('a', href=lambda x: x and '/company/' in x)
-            if not company_elem:
-                continue
-            company_name = company_elem.get_text(strip=True)
-
-            href = company_elem.get('href', '')
-            href_parts = [p for p in href.split('/') if p]
-            raw_ticker = ""
-            if 'company' in href_parts:
-                idx = href_parts.index('company')
-                if idx + 1 < len(href_parts):
-                    raw_ticker = href_parts[idx + 1].strip()
-
-            formatted_ticker = format_ticker(raw_ticker)
-            text_block = card.get_text(separator=" ", strip=True)
-            
-            pdf_link = ""
-            link_elem = card.find('a', href=lambda x: x and ('.pdf' in x or 'announcements' in x))
-            if link_elem:
-                h = link_elem['href']
-                pdf_link = h if h.startswith('http') else "https://www.screener.in" + h
-
-            # Primary Deduplication Key: PDF Link (100% unique per filing)
-            if pdf_link and "screener.in" not in pdf_link:
-                unique_key = pdf_link.strip()
-            else:
-                clean_text = normalize_details(text_block)
-                unique_key = f"{company_name.upper()}_{clean_text[:120]}"
-
-            if unique_key in seen_in_page:
-                continue
-            seen_in_page.add(unique_key)
-
-            updates.append({
-                "company": company_name,
-                "ticker": formatted_ticker,
-                "raw_ticker": raw_ticker,
-                "details": text_block[:300],
-                "pdf_link": pdf_link if pdf_link else SCREENER_URL,
-                "signature": unique_key
-            })
-
-        return updates
-    except Exception as e:
-        print(f"Error fetching data: {e}")
-        return []
-
-def run_automation():
+    watchlist = get_watchlist(gc)
     seen_ids = load_last_seen()
-    watchlist_metrics = get_watchlist_metrics()
-    
-    # Read existing PDF Links from Sheet to prevent historical duplicates
+
+    # Hydrate seen_ids from Google Sheet history
     try:
-        expansion_sheet = init_google_sheet(EXPANSION_TAB)
         recent_rows = expansion_sheet.get_all_values()
         for row in recent_rows[1:150]:
-            if len(row) >= 4:
-                pdf_val = row[3].strip()
-                if pdf_val and pdf_val.startswith("http"):
-                    seen_ids.add(pdf_val)
-                comp_val = row[1].strip().upper()
-                det_val = normalize_details(row[2])[:120]
-                seen_ids.add(f"{comp_val}_{det_val}")
+            if len(row) >= 4 and row[3].startswith("http"):
+                seen_ids.add(row[3].strip())
     except Exception as e:
-        print(f"Warning reading sheet: {e}")
+        logging.warning(f"Could not read historical sheet rows: {e}")
 
-    current_updates = fetch_expansion_announcements()
-    if not current_updates:
-        print("No updates parsed.")
-        return
+    logging.info(f"Scanning Capacity Expansions for {len(watchlist)} stocks via BSE API...")
 
-    new_items_to_add = []
-    for item in current_updates:
-        if item['signature'] in seen_ids:
-            continue
-        new_items_to_add.append(item)
+    for scrip_cd, info in watchlist.items():
+        announcements = fetch_bse_announcements(scrip_cd)
+        for ann in announcements:
+            headline = str(ann.get('HEADLINE', '')).strip()
+            news_sub = str(ann.get('NEWSSUB', '')).strip()
+            combined_text = f"{news_sub} {headline}".lower()
 
-    if new_items_to_add:
-        print(f"\nFound {len(new_items_to_add)} new announcements to sync...")
-        for item in reversed(new_items_to_add):
-            print(f"\n🚨 NEW EXPANSION FOUND:\n- Company: {item['company']}\n- Ticker: {item['ticker']}")
-            
-            # Lookup Price, Mcap, and PE from Watchlist, fallback to BSE API
-            comp_key = item['company'].strip().upper()
-            tick_key = item['ticker'].strip().upper()
-            
-            stock_info = watchlist_metrics.get(tick_key) or watchlist_metrics.get(comp_key)
-            if stock_info and stock_info.get("price") != "N/A":
-                price = stock_info["price"]
-                mcap = stock_info["mcap"]
-                pe = stock_info["pe"]
-            else:
-                price, mcap, pe = fetch_bse_live_metrics(item['raw_ticker'])
+            # Keyword filtering for capacity expansion filings
+            if not any(k in combined_text for k in EXPANSION_KEYWORDS):
+                continue
+
+            attachment = ann.get('ATTACHMENTNAME')
+            pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}" if attachment else ""
+            unique_key = pdf_url if pdf_url else f"{scrip_cd}_{headline}"
+
+            if unique_key in seen_ids:
+                continue
 
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Formulas for Google Sheets
+
             price_formula = '=IFERROR(GOOGLEFINANCE(F2, "price"), "N/A")'
             mcap_formula  = '=IFERROR(GOOGLEFINANCE(F2, "marketcap")/10000000, "N/A")'
             pe_formula    = '=IFERROR(GOOGLEFINANCE(F2, "pe"), "N/A")'
@@ -267,36 +157,32 @@ def run_automation():
             low_formula   = '=IFERROR(GOOGLEFINANCE(F2, "low52"), "N/A")'
 
             expansion_sheet.insert_row([
-                current_time, 
-                item['company'], 
-                item['details'], 
-                item['pdf_link'], 
+                current_time,
+                info['company'],
+                headline,
+                pdf_url,
                 "READY",
-                item['ticker'],
+                info['ticker_formatted'],
                 price_formula,
                 mcap_formula,
                 pe_formula,
                 high_formula,
                 low_formula
             ], index=2, value_input_option="USER_ENTERED")
-            
+
             send_telegram_alert(
-                item['company'], 
-                item['ticker'], 
-                item['details'], 
-                item['pdf_link'],
-                price=price,
-                mcap=mcap,
-                pe=pe
+                company=info['company'],
+                ticker=info['ticker_formatted'],
+                title=headline,
+                pdf_link=pdf_url,
+                price=info['price'],
+                mcap=info['mcap'],
+                pe=info['pe']
             )
-            
-            seen_ids.add(item['signature'])
+
+            seen_ids.add(unique_key)
             save_last_seen(seen_ids)
-            time.sleep(2) 
-        
-        print("\nSynced successfully.")
-    else:
-        print("\nNo new capacity updates found.")
+            time.sleep(1)
 
 if __name__ == "__main__":
-    run_automation()
+    run_expansion_tracker()
