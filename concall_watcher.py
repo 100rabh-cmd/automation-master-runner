@@ -7,6 +7,7 @@ import requests
 from bs4 import BeautifulSoup
 import gspread
 import time
+import html
 from oauth2client.service_account import ServiceAccountCredentials
 
 load_dotenv()
@@ -59,20 +60,23 @@ def send_telegram_alert(company, ticker, title, pdf_link):
         print("Telegram skipped: Bot token not configured.")
         return
     
-    ticker_display = f" (`{ticker}`)" if ticker else ""
+    ticker_display = f" (<code>{html.escape(ticker)}</code>)" if ticker else ""
+    safe_company = html.escape(company)
+    safe_title = html.escape(title)
 
     message = (
-        f"🎙️ *New Concall / Investor Presentation Alert!*\n\n"
-        f"📌 *Company:* {company}{ticker_display}\n\n"
-        f"📝 *Details:* {title}\n\n"
-        f"📄 *PDF Document:* {pdf_link}\n\n"
+        f"🎙️ <b>New Concall / Investor Presentation Alert!</b>\n\n"
+        f"📌 <b>Company:</b> {safe_company}{ticker_display}\n\n"
+        f"📝 <b>Details:</b> {safe_title}\n\n"
+        f"📄 <b>PDF Document:</b> {pdf_link}\n\n"
         f"📲 Follow: @financewith100rabh"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_CC}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID_CC,
         "text": message,
-        "parse_mode": "Markdown"
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
     try:
         response = requests.post(url, json=payload, timeout=10)
@@ -187,12 +191,12 @@ def run_automation():
             
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # Google Finance formulas for sheet reference
-            price_formula = '=IFERROR(GOOGLEFINANCE(F2, "price"), "N/A")'
-            mcap_formula  = '=IFERROR(GOOGLEFINANCE(F2, "marketcap")/10000000, "N/A")'
-            pe_formula    = '=IFERROR(GOOGLEFINANCE(F2, "pe"), "N/A")'
-            high_formula  = '=IFERROR(GOOGLEFINANCE(F2, "high52"), "N/A")'
-            low_formula   = '=IFERROR(GOOGLEFINANCE(F2, "low52"), "N/A")'
+            # Use dynamic ROW() reference so inserted rows always point to their own row ticker in Column F
+            price_formula = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "price"), "N/A")'
+            mcap_formula  = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "marketcap")/10000000, "N/A")'
+            pe_formula    = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "pe"), "N/A")'
+            high_formula  = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "high52"), "N/A")'
+            low_formula   = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "low52"), "N/A")'
 
             concall_sheet.insert_row([
                 current_time, 
