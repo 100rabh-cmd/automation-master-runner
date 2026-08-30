@@ -27,7 +27,6 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-
     # Dynamically generates credentials.json for Google Sheets integration
     - name: Create credentials.json
       env:
@@ -35,7 +34,7 @@ jobs:
       run: |
         python -c "import os; open('credentials.json', 'w').write(os.environ['CREDENTIALS_JSON'])"
 
-    - name: Execute Master Runner Script
+    - name: Execute Master Automation Engine
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -48,7 +47,7 @@ jobs:
         TELEGRAM_BOT_TOKEN_CC: ${{ secrets.TELEGRAM_BOT_TOKEN_CC }}
         TELEGRAM_CHAT_ID_CC: ${{ secrets.TELEGRAM_CHAT_ID_CC }}
       run: |
-        python master_runner.py
+        python master_automation.py
 
     # Persists updated state files back to GitHub to prevent duplicate alerts
     - name: Commit updated state JSON files
