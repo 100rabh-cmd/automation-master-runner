@@ -15,12 +15,23 @@ warnings.filterwarnings("ignore")
 
 load_dotenv()
 
+# Telegram Channel Tokens & IDs
 TELEGRAM_BOT_TOKEN_ANN = os.getenv("TELEGRAM_BOT_TOKEN_ANN")
 TELEGRAM_CHAT_ID_ANN = os.getenv("TELEGRAM_CHAT_ID_ANN")
+
+TELEGRAM_BOT_TOKEN_RES = os.getenv("TELEGRAM_BOT_TOKEN_RES")
+TELEGRAM_CHAT_ID_RES = os.getenv("TELEGRAM_CHAT_ID_RES")
+
+TELEGRAM_BOT_TOKEN_CE = os.getenv("TELEGRAM_BOT_TOKEN_CE")
+TELEGRAM_CHAT_ID_CE = os.getenv("TELEGRAM_CHAT_ID_CE")
+
+TELEGRAM_BOT_TOKEN_CC = os.getenv("TELEGRAM_BOT_TOKEN_CC")
+TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
+
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
 
-# Noise keywords to ignore across both modes
+# Noise keywords to ignore completely
 NOISE_KEYWORDS = [
     "general", "trading window", "share certificate", "loss of share",
     "duplicate share", "compliance certificate", "newspaper publication",
@@ -50,7 +61,6 @@ class MasterAutomationEngine:
         self.watchlist_sheet = self.sh.worksheet("Watchlist")
         self.logs_sheet = self.sh.worksheet("Log")
         
-        # Load or create Settings tab
         try:
             self.settings_sheet = self.sh.worksheet("Settings")
         except Exception:
@@ -58,7 +68,6 @@ class MasterAutomationEngine:
             self.settings_sheet = None
 
     def get_scan_mode(self) -> str:
-        """Reads Cell B1 from Settings sheet. Returns 'WATCHLIST' or 'ALL_STOCKS'."""
         if not self.settings_sheet:
             return "WATCHLIST"
         try:
@@ -69,7 +78,6 @@ class MasterAutomationEngine:
             return "WATCHLIST"
 
     def get_watchlist(self) -> dict:
-        """Fetches active stocks mapping scrip code -> metadata."""
         try:
             data = self.watchlist_sheet.get_all_records()
             watchlist = {}
@@ -91,7 +99,6 @@ class MasterAutomationEngine:
             return {}
 
     def get_processed_headlines(self) -> set:
-        """Reads previously logged headlines from Log tab."""
         try:
             records = self.logs_sheet.get_all_records()
             return {str(r.get('Headline', '')).strip() for r in records if r.get('Headline')}
@@ -100,7 +107,6 @@ class MasterAutomationEngine:
             return set()
 
     def fetch_bse_announcements(self, scrip_cd: str = "") -> list:
-        """Fetches announcements. If scrip_cd is empty, fetches market-wide feed."""
         url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -118,7 +124,7 @@ class MasterAutomationEngine:
 
     def classify_news_strict(self, headline: str) -> str:
         h = headline.lower()
-        if any(k in h for k in ["award", "order", "contract", "bagging"]):
+        if any(k in h for k in ["award", "order", "contract", "bagging", "expansion"]):
             return "Expansion / Order"
         if any(k in h for k in ["presentation", "earnings call", "concall", "transcript"]):
             return "Investor Presentation"
@@ -130,7 +136,30 @@ class MasterAutomationEngine:
             return "Insider Trading"
         return "General"
 
+    def get_channel_credentials(self, category: str):
+        """Routes alerts to specific Telegram bots/chats based on category."""
+        if category == "Financial Results":
+            token = TELEGRAM_BOT_TOKEN_RES or TELEGRAM_BOT_TOKEN_ANN
+            chat_id = TELEGRAM_CHAT_ID_RES or TELEGRAM_CHAT_ID_ANN
+        elif category == "Expansion / Order":
+            token = TELEGRAM_BOT_TOKEN_CE or TELEGRAM_BOT_TOKEN_ANN
+            chat_id = TELEGRAM_CHAT_ID_CE or TELEGRAM_CHAT_ID_ANN
+        elif category == "Investor Presentation":
+            token = TELEGRAM_BOT_TOKEN_CC or TELEGRAM_BOT_TOKEN_ANN
+            chat_id = TELEGRAM_CHAT_ID_CC or TELEGRAM_CHAT_ID_ANN
+        else:
+            token = TELEGRAM_BOT_TOKEN_ANN
+            chat_id = TELEGRAM_CHAT_ID_ANN
+            
+        return token, chat_id
+
     def send_telegram_alert(self, scrip_cd: str, stock_name: str, category: str, headline: str, pdf_url: str, stock_info: dict = None):
+        bot_token, chat_id = self.get_channel_credentials(category)
+        
+        if not bot_token or not chat_id:
+            logging.warning(f"No valid Telegram credentials found for category '{category}'. Skipping alert.")
+            return
+
         metrics_block = ""
         if stock_info:
             price = stock_info.get('price', 'N/A')
@@ -154,9 +183,9 @@ class MasterAutomationEngine:
 
         text += "\n\n📲 Follow: @financewith100rabh"
 
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_ANN}/sendMessage"
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         payload = {
-            "chat_id": TELEGRAM_CHAT_ID_ANN,
+            "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML",
             "disable_web_page_preview": True
@@ -164,7 +193,7 @@ class MasterAutomationEngine:
         try:
             requests.post(url, json=payload, timeout=10)
         except Exception as e:
-            logging.error(f"Failed to send Telegram alert: {e}")
+            logging.error(f"Failed to send Telegram alert for {category}: {e}")
 
     def run(self):
         mode = self.get_scan_mode()
@@ -183,7 +212,6 @@ class MasterAutomationEngine:
                 for item in items:
                     announcements_to_process.append((scrip_cd, stock_info.get('name', 'Unknown'), stock_info, item))
         else:
-            # ALL_STOCKS Mode: Fetch single market-wide feed
             logging.info("Fetching market-wide live feed across ALL listed stocks...")
             items = self.fetch_bse_announcements(scrip_cd="")
             for item in items:
@@ -191,16 +219,13 @@ class MasterAutomationEngine:
                 company_name = str(item.get('SLONGNAME', item.get('sname', 'Unknown'))).strip()
                 announcements_to_process.append((scrip_cd, company_name, None, item))
 
-        # Process gathered announcements
         for scrip_cd, company_name, stock_info, ann in announcements_to_process:
             headline = str(ann.get('HEADLINE', '')).strip()
             bse_category = str(ann.get('CATEGORYNAME', '')).strip()
 
-            # 1. Deduplication
             if not headline or headline in processed_headlines:
                 continue
 
-            # 2. Time Filter (48-hour cutoff)
             news_dt_str = str(ann.get('NEWS_DT', ''))
             try:
                 clean_date_str = news_dt_str.split('.')[0]
@@ -210,11 +235,9 @@ class MasterAutomationEngine:
             except Exception:
                 pass
 
-            # 3. High Impact Keyword Check
             if not any(word in headline.lower() for word in HIGH_IMPACT_KEYWORDS):
                 continue
 
-            # 4. Noise Filter Check
             if is_noise(bse_category, headline):
                 continue
 
@@ -226,7 +249,7 @@ class MasterAutomationEngine:
             pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}" if attachment else ""
             details = "⏳ PENDING" if pdf_url else "No PDF available."
 
-            logging.info(f"[{mode}] Alerting: {company_name} - {headline}")
+            logging.info(f"[{mode}] Alerting ({category}): {company_name} - {headline}")
 
             try:
                 self.logs_sheet.append_row([news_dt_str, scrip_cd, category, headline, details, pdf_url])
