@@ -31,20 +31,39 @@ TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
 
+# TARGETED BSE REGULATION 30 TAGS & KEYWORDS (INCLUDES FINANCIAL RESULTS VARIATIONS)
+EXACT_TARGET_TAGS = [
+    # Financial Results (Catches: Board Meeting Outcome - Financial Results, Unaudited Financial Results, etc.)
+    "financial results",
+    "financial result",
+    "board meeting outcome - financial results",
+    
+    # Investor Meets & Calls
+    "analyst / investor meet - outcome",
+    
+    # Corporate & Expansion Updates
+    "incorporation of subsidiary",
+    "award_of_order_receipt_of_order",
+    "acquisition",
+    "press release / media release",
+    "announcement under reg 30_new aoa moa",
+    
+    # Capital & Governance Updates
+    "bonus / stock split / rights issue",
+    "dividend updates",
+    "credit rating",
+    "change in management"
+]
+
 NOISE_KEYWORDS = [
-    "general", "trading window", "share certificate", "loss of share",
+    "trading window", "share certificate", "loss of share",
     "duplicate share", "compliance certificate", "newspaper publication",
-    "clarification", "voting results", "scrutinizer report"
+    "clarification", "voting results", "scrutinizer report", "loss of certificate"
 ]
 
-HIGH_IMPACT_KEYWORDS = [
-    'order', 'result', 'presentation', 'earnings', 'management', 
-    'insider', 'award', 'contract', 'bagging', 'concall', 'expansion'
-]
-
-def is_noise(category="", title=""):
-    combined = f"{category} {title}".lower().strip()
-    return any(k in combined for k in NOISE_KEYWORDS)
+def is_noise(combined_text=""):
+    text = combined_text.lower().strip()
+    return any(k in text for k in NOISE_KEYWORDS)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -67,7 +86,6 @@ class MasterAutomationEngine:
         self._worksheet_cache = {}
 
     def get_or_create_worksheet(self, tab_name: str):
-        """Fetches a worksheet tab, or creates it with default headers if missing."""
         if tab_name in self._worksheet_cache:
             return self._worksheet_cache[tab_name]
 
@@ -82,12 +100,11 @@ class MasterAutomationEngine:
         return ws
 
     def get_target_tab_name(self, category: str) -> str:
-        """Maps output categories to their dedicated Google Sheet tab names."""
         if category == "Financial Results":
             return "Results"
-        elif category == "Expansion / Order":
+        elif category in ["Expansion / Order / M&A", "Securities & Capital"]:
             return "Expansion"
-        elif category == "Investor Presentation":
+        elif category == "Concall / Investor Meet":
             return "Concall"
         return "Log"
 
@@ -123,7 +140,6 @@ class MasterAutomationEngine:
             return {}
 
     def get_processed_headlines(self) -> set:
-        """Scans all logging tabs to build a comprehensive deduplication set."""
         processed = set()
         tabs_to_check = ["Log", "Results", "Expansion", "Concall"]
         
@@ -133,9 +149,7 @@ class MasterAutomationEngine:
                 rows = ws.get_all_values()
                 if len(rows) > 1:
                     header = [h.strip() for h in rows[0]]
-                    # Find 'Headline' column index dynamically, default to index 3 (4th column)
                     headline_idx = header.index("Headline") if "Headline" in header else 3
-                    
                     for r in rows[1:]:
                         if len(r) > headline_idx:
                             h = str(r[headline_idx]).strip()
@@ -147,7 +161,7 @@ class MasterAutomationEngine:
                 logging.error(f"Error reading logs from tab '{tab_name}': {e}")
                 
         return processed
-        
+
     def fetch_bse_announcements(self, scrip_cd: str = "") -> list:
         url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
         headers = {
@@ -164,28 +178,55 @@ class MasterAutomationEngine:
             logging.error(f"Failed to fetch BSE data (scrip='{scrip_cd}'): {e}")
             return []
 
-    def classify_news_strict(self, headline: str) -> str:
-        h = headline.lower()
-        if any(k in h for k in ["award", "order", "contract", "bagging", "expansion"]):
-            return "Expansion / Order"
-        if any(k in h for k in ["presentation", "earnings call", "concall", "transcript"]):
-            return "Investor Presentation"
-        if any(k in h for k in ["management", "resignation", "appointment", "director"]):
-            return "Management Change"
-        if any(k in h for k in ["financial results", "outcome of board meeting"]):
+    def classify_news_strict(self, combined_text: str) -> str:
+        text = combined_text.lower()
+        
+        # 1. Financial Results -> Results Tab & Channel
+        if any(k in text for k in ["financial result", "financial results"]):
             return "Financial Results"
-        if "insider" in h or "trading window" in h:
-            return "Insider Trading"
-        return "General"
+            
+        # 2. Concall / Investor Meet -> Concall Tab & Channel
+        if "analyst / investor meet - outcome" in text or "investor meet" in text:
+            return "Concall / Investor Meet"
+            
+        # 3. Orders / M&A / Expansion -> Expansion Tab & Channel
+        if any(tag in text for tag in [
+            "award_of_order_receipt_of_order", 
+            "acquisition", 
+            "incorporation of subsidiary"
+        ]):
+            return "Expansion / Order / M&A"
+            
+        # 4. Securities & Capital Actions -> Expansion Tab & Channel
+        if "bonus / stock split / rights issue" in text:
+            return "Securities & Capital"
+
+        # 5. Dividend Updates -> Log Tab & Main Channel
+        if "dividend updates" in text:
+            return "Dividend Update"
+
+        # 6. Change in Management -> Log Tab & Main Channel
+        if "change in management" in text:
+            return "Management Change"
+            
+        # 7. Credit Rating -> Log Tab & Main Channel
+        if "credit rating" in text:
+            return "Credit Rating"
+
+        # 8. Press Releases & Corporate MoA Updates -> Log Tab & Main Channel
+        if "press release / media release" in text or "announcement under reg 30_new aoa moa" in text:
+            return "Press / Corporate Release"
+
+        return "General Announcement"
 
     def get_channel_credentials(self, category: str):
         if category == "Financial Results":
             token = TELEGRAM_BOT_TOKEN_RES or TELEGRAM_BOT_TOKEN_ANN
             chat_id = TELEGRAM_CHAT_ID_RES or TELEGRAM_CHAT_ID_ANN
-        elif category == "Expansion / Order":
+        elif category in ["Expansion / Order / M&A", "Securities & Capital"]:
             token = TELEGRAM_BOT_TOKEN_CE or TELEGRAM_BOT_TOKEN_ANN
             chat_id = TELEGRAM_CHAT_ID_CE or TELEGRAM_CHAT_ID_ANN
-        elif category == "Investor Presentation":
+        elif category == "Concall / Investor Meet":
             token = TELEGRAM_BOT_TOKEN_CC or TELEGRAM_BOT_TOKEN_ANN
             chat_id = TELEGRAM_CHAT_ID_CC or TELEGRAM_CHAT_ID_ANN
         else:
@@ -260,9 +301,17 @@ class MasterAutomationEngine:
                 company_name = str(item.get('SLONGNAME', item.get('sname', 'Unknown'))).strip()
                 announcements_to_process.append((scrip_cd, company_name, None, item))
 
+        logging.info(f"Total raw BSE announcements fetched: {len(announcements_to_process)}")
+
         for scrip_cd, company_name, stock_info, ann in announcements_to_process:
             headline = str(ann.get('HEADLINE', '')).strip()
+            news_subject = str(ann.get('NEWS_SUBJECT', '')).strip()
             bse_category = str(ann.get('CATEGORYNAME', '')).strip()
+            sub_category = str(ann.get('NEWSSUB', ann.get('SUBCATNAME', ''))).strip()
+            more_desc = str(ann.get('MORE', '')).strip()
+
+            # CONCATENATE ALL FIELDS TO ENSURE NO FIELD IS MISSED
+            combined_text = f"{news_subject} {bse_category} {sub_category} {headline} {more_desc}".lower()
 
             if not headline or headline in processed_headlines:
                 continue
@@ -276,15 +325,14 @@ class MasterAutomationEngine:
             except Exception:
                 pass
 
-            if not any(word in headline.lower() for word in HIGH_IMPACT_KEYWORDS):
+            # STRICT CHECK: Match ONLY the specified target tags (includes all financial results variations)
+            if not any(tag in combined_text for tag in EXACT_TARGET_TAGS):
                 continue
 
-            if is_noise(bse_category, headline):
+            if is_noise(combined_text):
                 continue
 
-            category = self.classify_news_strict(headline)
-            if category == "General":
-                continue
+            category = self.classify_news_strict(combined_text)
 
             attachment = ann.get('ATTACHMENTNAME')
             pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}" if attachment else ""
@@ -294,7 +342,6 @@ class MasterAutomationEngine:
             logging.info(f"[{mode}] Alerting ({category} -> Tab: '{target_tab_name}'): {company_name} - {headline}")
 
             try:
-                # Append to specific Google Sheet tab
                 target_sheet = self.get_or_create_worksheet(target_tab_name)
                 target_sheet.append_row([news_dt_str, scrip_cd, category, headline, details, pdf_url])
                 
