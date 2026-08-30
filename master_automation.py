@@ -31,7 +31,6 @@ TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
 
-# Noise keywords to ignore completely
 NOISE_KEYWORDS = [
     "general", "trading window", "share certificate", "loss of share",
     "duplicate share", "compliance certificate", "newspaper publication",
@@ -44,7 +43,6 @@ HIGH_IMPACT_KEYWORDS = [
 ]
 
 def is_noise(category="", title=""):
-    """Returns True if announcement contains noise keywords."""
     combined = f"{category} {title}".lower().strip()
     return any(k in combined for k in NOISE_KEYWORDS)
 
@@ -59,13 +57,39 @@ class MasterAutomationEngine:
         self.gc = gspread.service_account(filename=CREDENTIALS_FILE)
         self.sh = self.gc.open(GOOGLE_SHEET_NAME)
         self.watchlist_sheet = self.sh.worksheet("Watchlist")
-        self.logs_sheet = self.sh.worksheet("Log")
         
         try:
             self.settings_sheet = self.sh.worksheet("Settings")
         except Exception:
             logging.info("Settings tab not found. Defaulting to WATCHLIST mode.")
             self.settings_sheet = None
+
+        self._worksheet_cache = {}
+
+    def get_or_create_worksheet(self, tab_name: str):
+        """Fetches a worksheet tab, or creates it with default headers if missing."""
+        if tab_name in self._worksheet_cache:
+            return self._worksheet_cache[tab_name]
+
+        try:
+            ws = self.sh.worksheet(tab_name)
+        except gspread.exceptions.WorksheetNotFound:
+            logging.info(f"Tab '{tab_name}' not found. Creating it...")
+            ws = self.sh.add_worksheet(title=tab_name, rows="1000", cols="10")
+            ws.append_row(["Date", "Scrip Code", "Category", "Headline", "Details", "PDF Link"])
+
+        self._worksheet_cache[tab_name] = ws
+        return ws
+
+    def get_target_tab_name(self, category: str) -> str:
+        """Maps output categories to their dedicated Google Sheet tab names."""
+        if category == "Financial Results":
+            return "Results"
+        elif category == "Expansion / Order":
+            return "Expansion"
+        elif category == "Investor Presentation":
+            return "Concall"
+        return "Log"
 
     def get_scan_mode(self) -> str:
         if not self.settings_sheet:
@@ -99,12 +123,24 @@ class MasterAutomationEngine:
             return {}
 
     def get_processed_headlines(self) -> set:
-        try:
-            records = self.logs_sheet.get_all_records()
-            return {str(r.get('Headline', '')).strip() for r in records if r.get('Headline')}
-        except Exception as e:
-            logging.error(f"Could not read previous logs: {e}")
-            return set()
+        """Scans all logging tabs to build a comprehensive deduplication set."""
+        processed = set()
+        tabs_to_check = ["Log", "Results", "Expansion", "Concall"]
+        
+        for tab_name in tabs_to_check:
+            try:
+                ws = self.sh.worksheet(tab_name)
+                records = ws.get_all_records()
+                for r in records:
+                    h = str(r.get('Headline', '')).strip()
+                    if h:
+                        processed.add(h)
+            except gspread.exceptions.WorksheetNotFound:
+                continue
+            except Exception as e:
+                logging.error(f"Error reading logs from tab '{tab_name}': {e}")
+                
+        return processed
 
     def fetch_bse_announcements(self, scrip_cd: str = "") -> list:
         url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
@@ -137,7 +173,6 @@ class MasterAutomationEngine:
         return "General"
 
     def get_channel_credentials(self, category: str):
-        """Routes alerts to specific Telegram bots/chats based on category."""
         if category == "Financial Results":
             token = TELEGRAM_BOT_TOKEN_RES or TELEGRAM_BOT_TOKEN_ANN
             chat_id = TELEGRAM_CHAT_ID_RES or TELEGRAM_CHAT_ID_ANN
@@ -157,7 +192,7 @@ class MasterAutomationEngine:
         bot_token, chat_id = self.get_channel_credentials(category)
         
         if not bot_token or not chat_id:
-            logging.warning(f"No valid Telegram credentials found for category '{category}'. Skipping alert.")
+            logging.warning(f"No valid Telegram credentials for category '{category}'. Skipping alert.")
             return
 
         metrics_block = ""
@@ -249,10 +284,14 @@ class MasterAutomationEngine:
             pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}" if attachment else ""
             details = "⏳ PENDING" if pdf_url else "No PDF available."
 
-            logging.info(f"[{mode}] Alerting ({category}): {company_name} - {headline}")
+            target_tab_name = self.get_target_tab_name(category)
+            logging.info(f"[{mode}] Alerting ({category} -> Tab: '{target_tab_name}'): {company_name} - {headline}")
 
             try:
-                self.logs_sheet.append_row([news_dt_str, scrip_cd, category, headline, details, pdf_url])
+                # Append to specific Google Sheet tab
+                target_sheet = self.get_or_create_worksheet(target_tab_name)
+                target_sheet.append_row([news_dt_str, scrip_cd, category, headline, details, pdf_url])
+                
                 processed_headlines.add(headline)
                 self.send_telegram_alert(scrip_cd, company_name, category, headline, pdf_url, stock_info)
                 time.sleep(1.5)
