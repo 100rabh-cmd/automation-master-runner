@@ -1,11 +1,13 @@
 import os
 import time
+import json
 import logging
 import warnings
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import gspread
+from gspread.exceptions import APIError
 
 warnings.filterwarnings("ignore")
 
@@ -30,6 +32,7 @@ TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
+STATE_FILE = "master_automation_state.json"
 
 # TARGETED BSE REGULATION 30 TAGS & KEYWORDS (INCLUDES FINANCIAL RESULTS VARIATIONS)
 EXACT_TARGET_TAGS = [
@@ -52,8 +55,7 @@ EXACT_TARGET_TAGS = [
     "bonus / stock split / rights issue",
     "dividend updates",
     "credit rating",
-    "change in management"
-
+    "change in management",
     "buyback",
     "fund raising",
     "issue of securities",
@@ -84,7 +86,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 class MasterAutomationEngine:
     def __init__(self):
         self.gc = gspread.service_account(filename=CREDENTIALS_FILE)
-        self.sh = self.gc.open(GOOGLE_SHEET_NAME)
+        self.sh = self._connect_sheets_with_retry()
         self.watchlist_sheet = self.sh.worksheet("Watchlist")
         
         try:
@@ -94,6 +96,43 @@ class MasterAutomationEngine:
             self.settings_sheet = None
 
         self._worksheet_cache = {}
+
+    def _connect_sheets_with_retry(self, max_retries=5):
+        """Retries opening Google Sheet with exponential backoff on 503 errors."""
+        for attempt in range(1, max_retries + 1):
+            try:
+                sheet = self.gc.open(GOOGLE_SHEET_NAME)
+                logging.info(f"Successfully connected to Google Sheet: '{GOOGLE_SHEET_NAME}'")
+                return sheet
+            except APIError as e:
+                if attempt == max_retries:
+                    logging.error(f"Failed to connect to Google Sheets after {max_retries} attempts.")
+                    raise e
+                wait_time = attempt * 5
+                logging.warning(f"Google API Error (503/Server Error). Retrying connection in {wait_time}s... (Attempt {attempt}/{max_retries})")
+                time.sleep(wait_time)
+
+    def load_last_run_time(self) -> datetime:
+        """Loads last run timestamp from state file or defaults to 2 days ago."""
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, "r") as f:
+                    data = json.load(f)
+                    if "last_run_iso" in data:
+                        return datetime.fromisoformat(data["last_run_iso"])
+            except Exception as e:
+                logging.warning(f"Could not read state file: {e}")
+        
+        # Default fallback window if no state file exists
+        return datetime.now() - timedelta(days=2)
+
+    def save_last_run_time(self, run_time: datetime):
+        """Saves current run timestamp to state file for the next execution."""
+        try:
+            with open(STATE_FILE, "w") as f:
+                json.dump({"last_run_iso": run_time.isoformat()}, f, indent=2)
+        except Exception as e:
+            logging.error(f"Failed to write state file: {e}")
 
     def get_or_create_worksheet(self, tab_name: str):
         if tab_name in self._worksheet_cache:
@@ -288,11 +327,15 @@ class MasterAutomationEngine:
             logging.error(f"Failed to send Telegram alert for {category}: {e}")
 
     def run(self):
+        run_start_time = datetime.now()
         mode = self.get_scan_mode()
         processed_headlines = self.get_processed_headlines()
-        cutoff_time = datetime.now() - timedelta(days=2)
+        
+        # Load state checkpoint (e.g., last run time)
+        cutoff_time = self.load_last_run_time()
 
         logging.info(f"=== Running Automation Engine in [{mode}] Mode ===")
+        logging.info(f"Filtering filings published AFTER: {cutoff_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
         announcements_to_process = []
 
@@ -313,6 +356,7 @@ class MasterAutomationEngine:
 
         logging.info(f"Total raw BSE announcements fetched: {len(announcements_to_process)}")
 
+        new_count = 0
         for scrip_cd, company_name, stock_info, ann in announcements_to_process:
             headline = str(ann.get('HEADLINE', '')).strip()
             news_subject = str(ann.get('NEWS_SUBJECT', '')).strip()
@@ -320,22 +364,22 @@ class MasterAutomationEngine:
             sub_category = str(ann.get('NEWSSUB', ann.get('SUBCATNAME', ''))).strip()
             more_desc = str(ann.get('MORE', '')).strip()
 
-            # CONCATENATE ALL FIELDS TO ENSURE NO FIELD IS MISSED
             combined_text = f"{news_subject} {bse_category} {sub_category} {headline} {more_desc}".lower()
 
             if not headline or headline in processed_headlines:
                 continue
 
+            # Strict Time Window Check: Ignore announcements older than or equal to last run checkpoint
             news_dt_str = str(ann.get('NEWS_DT', ''))
             try:
                 clean_date_str = news_dt_str.split('.')[0]
                 news_date = datetime.fromisoformat(clean_date_str)
-                if news_date < cutoff_time:
+                if news_date <= cutoff_time:
                     continue
             except Exception:
                 pass
 
-            # STRICT CHECK: Match ONLY the specified target tags (includes all financial results variations)
+            # STRICT CHECK: Match ONLY the specified target tags
             if not any(tag in combined_text for tag in EXACT_TARGET_TAGS):
                 continue
 
@@ -357,9 +401,14 @@ class MasterAutomationEngine:
                 
                 processed_headlines.add(headline)
                 self.send_telegram_alert(scrip_cd, company_name, category, headline, pdf_url, stock_info)
+                new_count += 1
                 time.sleep(1.5)
             except Exception as e:
                 logging.error(f"Failed to log/alert: {e}")
+
+        # Update checkpoint file upon successful execution completion
+        self.save_last_run_time(run_start_time)
+        logging.info(f"Finished run. Processed {new_count} new announcements. Checkpoint set to {run_start_time.strftime('%Y-%m-%d %H:%M:%S')}.")
 
 if __name__ == "__main__":
     engine = MasterAutomationEngine()
