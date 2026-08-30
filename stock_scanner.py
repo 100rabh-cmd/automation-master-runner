@@ -20,6 +20,25 @@ TELEGRAM_CHAT_ID_ANN = os.getenv("TELEGRAM_CHAT_ID_ANN")
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
 
+# Categories and keywords to ignore completely
+NOISE_KEYWORDS = [
+    "general",
+    "trading window",
+    "share certificate",
+    "loss of share",
+    "duplicate share",
+    "compliance certificate",
+    "newspaper publication",
+    "clarification",
+    "voting results",
+    "scrutinizer report"
+]
+
+def is_noise(category="", title=""):
+    """Returns True if the announcement matches any generic noise keyword."""
+    combined_text = f"{category} {title}".lower().strip()
+    return any(keyword in combined_text for keyword in NOISE_KEYWORDS)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ==============================================================================
@@ -154,6 +173,7 @@ class StockScanner:
 
             for ann in announcements:
                 headline = str(ann.get('HEADLINE', '')).strip()
+                bse_category = str(ann.get('CATEGORYNAME', '')).strip()
 
                 # 1. Check if already processed
                 if not headline or headline in processed_headlines:
@@ -174,7 +194,14 @@ class StockScanner:
                 if not any(word in headline.lower() for word in high_impact_keywords):
                     continue
 
+                # 4. Skip generic noise & general category announcements
+                if is_noise(bse_category, headline):
+                    continue
+
                 category = self.classify_news_strict(headline)
+                if category == "General":
+                    continue
+
                 attachment = ann.get('ATTACHMENTNAME')
                 pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}" if attachment else ""
                 details = "⏳ PENDING" if pdf_url else "No PDF available."
