@@ -53,6 +53,16 @@ EXACT_TARGET_TAGS = [
     "dividend updates",
     "credit rating",
     "change in management"
+
+    "buyback",
+    "fund raising",
+    "issue of securities",
+    "scheme of arrangement",
+    "demerger",
+    "investor presentation",
+    "earnings call transcript",
+    "change in directorate",
+    "resignation"
 ]
 
 NOISE_KEYWORDS = [
