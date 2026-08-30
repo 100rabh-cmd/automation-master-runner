@@ -130,18 +130,24 @@ class MasterAutomationEngine:
         for tab_name in tabs_to_check:
             try:
                 ws = self.sh.worksheet(tab_name)
-                records = ws.get_all_records()
-                for r in records:
-                    h = str(r.get('Headline', '')).strip()
-                    if h:
-                        processed.add(h)
+                rows = ws.get_all_values()
+                if len(rows) > 1:
+                    header = [h.strip() for h in rows[0]]
+                    # Find 'Headline' column index dynamically, default to index 3 (4th column)
+                    headline_idx = header.index("Headline") if "Headline" in header else 3
+                    
+                    for r in rows[1:]:
+                        if len(r) > headline_idx:
+                            h = str(r[headline_idx]).strip()
+                            if h:
+                                processed.add(h)
             except gspread.exceptions.WorksheetNotFound:
                 continue
             except Exception as e:
                 logging.error(f"Error reading logs from tab '{tab_name}': {e}")
                 
         return processed
-
+        
     def fetch_bse_announcements(self, scrip_cd: str = "") -> list:
         url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
         headers = {
