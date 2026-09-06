@@ -103,17 +103,22 @@ class MasterAutomationEngine:
         self.session = self._init_bse_session()
 
     def _init_bse_session(self) -> requests.Session:
-        """Initializes a persistent HTTP session and pre-warms BSE cookies."""
         session = requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
             'Referer': 'https://www.bseindia.com/',
-            'Origin': 'https://www.bseindia.com'
+            'Origin': 'https://www.bseindia.com',
+            'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site'
         })
         try:
-            # Pre-warm session to get valid Cloudflare / BSE web cookies
             session.get("https://www.bseindia.com/corporates/ann.html", timeout=10)
         except Exception as e:
             logging.warning(f"Session pre-warming warning: {e}")
@@ -219,18 +224,20 @@ class MasterAutomationEngine:
         return processed
 
     def fetch_bse_announcements(self, scrip_cd: str = "") -> list:
+        today_str = datetime.now().strftime("%Y%m%d")
+        prev_str = (datetime.now() - timedelta(days=2)).strftime("%Y%m%d")
+
         if scrip_cd:
-            url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
+            url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate={prev_str}&strScrip={scrip_cd}&strSearch=P&strToDate={today_str}&strType=C"
         else:
-            url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubmissionData/w?pageNo=1&strCat=-1&strPrevDate=&strScrip=&strSearch=P&strToDate=&strType=C"
+            url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubmissionData/w?pageNo=1&strCat=-1&strPrevDate={prev_str}&strScrip=&strSearch=P&strToDate={today_str}&strType=C"
 
         try:
             res = self.session.get(url, timeout=15)
             res.raise_for_status()
 
-            # Prevent JSONDecodeError if HTML error/block page is returned
             if res.text.strip().startswith("<"):
-                logging.warning(f"BSE API returned HTML instead of JSON. Refreshing session cookies...")
+                logging.warning("BSE API returned HTML instead of JSON. Refreshing session cookies...")
                 self.session = self._init_bse_session()
                 res = self.session.get(url, timeout=15)
 
@@ -241,7 +248,7 @@ class MasterAutomationEngine:
                 return data
             return []
         except requests.exceptions.JSONDecodeError:
-            logging.error(f"Failed to parse JSON response from BSE (scrip='{scrip_cd}'). Server output non-JSON text.")
+            logging.error(f"Failed to parse JSON response from BSE (scrip='{scrip_cd}'). Output non-JSON text.")
             return []
         except Exception as e:
             logging.error(f"Failed to fetch BSE data (scrip='{scrip_cd}'): {e}")
