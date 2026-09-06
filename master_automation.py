@@ -31,7 +31,6 @@ TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
-# Updated state file name to match GitHub Actions file pattern (last_seen_*.json)
 STATE_FILE = "last_seen_master.json"
 
 # TARGETED REGULATION 30 SUB-CATEGORIES
@@ -101,6 +100,24 @@ class MasterAutomationEngine:
             self.settings_sheet = None
 
         self._worksheet_cache = {}
+        self.session = self._init_bse_session()
+
+    def _init_bse_session(self) -> requests.Session:
+        """Initializes a persistent HTTP session and pre-warms BSE cookies."""
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.bseindia.com/',
+            'Origin': 'https://www.bseindia.com'
+        })
+        try:
+            # Pre-warm session to get valid Cloudflare / BSE web cookies
+            session.get("https://www.bseindia.com/corporates/ann.html", timeout=10)
+        except Exception as e:
+            logging.warning(f"Session pre-warming warning: {e}")
+        return session
 
     def _connect_sheets_with_retry(self, max_retries=5):
         for attempt in range(1, max_retries + 1):
@@ -202,26 +219,29 @@ class MasterAutomationEngine:
         return processed
 
     def fetch_bse_announcements(self, scrip_cd: str = "") -> list:
-        # Fixed: Routes to AnnSubmissionData/w for market-wide ALL_STOCKS scan
         if scrip_cd:
             url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
         else:
-            url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubmissionData/w?PageNo=1&strCat=-1&strPrevDate=&strScrip=&strSearch=P&strToDate=&strType=C"
+            url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubmissionData/w?pageNo=1&strCat=-1&strPrevDate=&strScrip=&strSearch=P&strToDate=&strType=C"
 
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Referer': 'https://www.bseindia.com/',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Origin': 'https://www.bseindia.com'
-        }
         try:
-            res = requests.get(url, headers=headers, timeout=15)
+            res = self.session.get(url, timeout=15)
             res.raise_for_status()
+
+            # Prevent JSONDecodeError if HTML error/block page is returned
+            if res.text.strip().startswith("<"):
+                logging.warning(f"BSE API returned HTML instead of JSON. Refreshing session cookies...")
+                self.session = self._init_bse_session()
+                res = self.session.get(url, timeout=15)
+
             data = res.json()
-            
             if isinstance(data, dict):
                 return data.get("Table", []) or data.get("Table1", [])
+            elif isinstance(data, list):
+                return data
+            return []
+        except requests.exceptions.JSONDecodeError:
+            logging.error(f"Failed to parse JSON response from BSE (scrip='{scrip_cd}'). Server output non-JSON text.")
             return []
         except Exception as e:
             logging.error(f"Failed to fetch BSE data (scrip='{scrip_cd}'): {e}")
