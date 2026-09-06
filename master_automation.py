@@ -29,31 +29,27 @@ TELEGRAM_CHAT_ID_CE = os.getenv("TELEGRAM_CHAT_ID_CE")
 TELEGRAM_BOT_TOKEN_CC = os.getenv("TELEGRAM_BOT_TOKEN_CC")
 TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
+# Optional: Add a Residential/Data Proxy URL in GitHub Secrets (e.g., http://user:pass@proxy.example.com:8080)
+BSE_PROXY_URL = os.getenv("BSE_PROXY_URL") or os.getenv("HTTPS_PROXY")
+
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
 STATE_FILE = "last_seen_master.json"
 
 # TARGETED REGULATION 30 SUB-CATEGORIES
 EXACT_TARGET_TAGS = [
-    # Orders & Expansion
     "award_of_order_receipt_of_order",
     "award of order",
     "receipt of order",
     "incorporation of subsidiary",
     "press release / media release",
     "announcement under reg 30_new aoa moa",
-    
-    # Financial Results
     "financial results",
     "financial result",
     "board meeting outcome - financial results",
-    
-    # Investor Meets & Calls
     "analyst / investor meet - outcome",
     "investor presentation",
     "earnings call transcript",
-    
-    # Capital & Governance Updates
     "bonus / stock split / rights issue",
     "dividend updates",
     "credit rating",
@@ -72,7 +68,6 @@ NOISE_KEYWORDS = [
     "trading window", "share certificate", "loss of share",
     "duplicate share", "compliance certificate", "newspaper publication",
     "clarification", "voting results", "scrutinizer report", "loss of certificate",
-    # SAST Disclosures to Ignore Completely
     "substantial acquisition", "takeovers", "regulation 29", "regulation 10", 
     "reg 29", "reg 10", "reg 29(2)", "reg 10(6)", "sast"
 ]
@@ -104,6 +99,15 @@ class MasterAutomationEngine:
 
     def _init_bse_session(self) -> requests.Session:
         session = requests.Session()
+        
+        # Attach proxy if configured
+        if BSE_PROXY_URL:
+            logging.info("Routing BSE requests through configured proxy.")
+            session.proxies = {
+                "http": BSE_PROXY_URL,
+                "https": BSE_PROXY_URL
+            }
+
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
@@ -118,10 +122,16 @@ class MasterAutomationEngine:
             'Sec-Fetch-Mode': 'cors',
             'Sec-Fetch-Site': 'same-site'
         })
+
+        # Corrected Pre-warm: Target api.bseindia.com directly
         try:
-            session.get("https://www.bseindia.com/corporates/ann.html", timeout=10)
+            warm_url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubmissionData/w?pageNo=1&strCat=-1&strPrevDate=&strScrip=&strSearch=P&strToDate=&strType=C"
+            res = session.get(warm_url, timeout=10)
+            if res.text.strip().startswith("<"):
+                logging.warning("WAF Challenge Detected during session pre-warm on api.bseindia.com (Datacenter IP likely blocked).")
         except Exception as e:
             logging.warning(f"Session pre-warming warning: {e}")
+            
         return session
 
     def _connect_sheets_with_retry(self, max_retries=5):
@@ -236,10 +246,10 @@ class MasterAutomationEngine:
             res = self.session.get(url, timeout=15)
             res.raise_for_status()
 
+            # Fail fast if IP is WAF-blocked (Returns HTML Challenge)
             if res.text.strip().startswith("<"):
-                logging.warning("BSE API returned HTML instead of JSON. Refreshing session cookies...")
-                self.session = self._init_bse_session()
-                res = self.session.get(url, timeout=15)
+                logging.error(f"BSE WAF IP Block Detected (Received HTML from {url}). Exiting fetch without retrying.")
+                return []
 
             data = res.json()
             if isinstance(data, dict):
@@ -248,7 +258,7 @@ class MasterAutomationEngine:
                 return data
             return []
         except requests.exceptions.JSONDecodeError:
-            logging.error(f"Failed to parse JSON response from BSE (scrip='{scrip_cd}'). Output non-JSON text.")
+            logging.error(f"Failed to parse JSON response from BSE (scrip='{scrip_cd}'). Server blocked request with non-JSON response.")
             return []
         except Exception as e:
             logging.error(f"Failed to fetch BSE data (scrip='{scrip_cd}'): {e}")
@@ -257,7 +267,6 @@ class MasterAutomationEngine:
     def classify_announcement_details(self, combined_text: str) -> tuple[str, str, str]:
         text = combined_text.lower()
         
-        # 1. Orders & Expansion
         if any(k in text for k in ["award_of_order_receipt_of_order", "award of order", "receipt of order"]):
             return "Award_of_Order_Receipt_of_Order", "Expansion", "CE"
         if "incorporation of subsidiary" in text:
@@ -269,15 +278,12 @@ class MasterAutomationEngine:
         if "fund raising" in text or "issue of securities" in text:
             return "Fund Raising / Securities", "Expansion", "CE"
 
-        # 2. Financial Results
         if any(k in text for k in ["financial result", "financial results"]):
             return "Financial Results", "Results", "RES"
 
-        # 3. Concalls & Investor Meets
         if any(k in text for k in ["analyst / investor meet - outcome", "earnings call transcript", "investor presentation"]):
             return "Concall / Investor Meet", "Concall", "CC"
 
-        # 4. Other Reg 30 Filings
         if "dividend updates" in text:
             return "Dividend Update", "Log", "ANN"
         if "credit rating" in text:
@@ -389,7 +395,6 @@ class MasterAutomationEngine:
             if not headline or headline in processed_headlines:
                 continue
 
-            # Time Window Check
             news_dt_str = str(ann.get('NEWS_DT', ''))
             try:
                 clean_date_str = news_dt_str.split('.')[0]
@@ -424,8 +429,12 @@ class MasterAutomationEngine:
             except Exception as e:
                 logging.error(f"Failed to log/alert: {e}")
 
-        self.save_last_run_time(run_start_time)
-        logging.info(f"Finished run. Processed {new_count} new announcements. Checkpoint set to {run_start_time.strftime('%Y-%m-%d %H:%M:%S')}.")
+        # Update checkpoint time only if fetch succeeded without block
+        if announcements_to_process or new_count > 0:
+            self.save_last_run_time(run_start_time)
+            logging.info(f"Finished run. Processed {new_count} new announcements. Checkpoint set to {run_start_time.strftime('%Y-%m-%d %H:%M:%S')}.")
+        else:
+            logging.warning("No data retrieved (likely WAF block). Skipping checkpoint update to avoid missing records.")
 
 if __name__ == "__main__":
     engine = MasterAutomationEngine()
