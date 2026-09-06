@@ -31,7 +31,8 @@ TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
-STATE_FILE = "master_automation_state.json"
+# Updated state file name to match GitHub Actions file pattern (last_seen_*.json)
+STATE_FILE = "last_seen_master.json"
 
 # TARGETED REGULATION 30 SUB-CATEGORIES
 EXACT_TARGET_TAGS = [
@@ -201,23 +202,32 @@ class MasterAutomationEngine:
         return processed
 
     def fetch_bse_announcements(self, scrip_cd: str = "") -> list:
-        url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
+        # Fixed: Routes to AnnSubmissionData/w for market-wide ALL_STOCKS scan
+        if scrip_cd:
+            url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
+        else:
+            url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubmissionData/w?PageNo=1&strCat=-1&strPrevDate=&strScrip=&strSearch=P&strToDate=&strType=C"
+
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
             'Referer': 'https://www.bseindia.com/',
-            'Accept': 'application/json, text/plain, */*'
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Origin': 'https://www.bseindia.com'
         }
         try:
-            res = requests.get(url, headers=headers, timeout=10)
+            res = requests.get(url, headers=headers, timeout=15)
             res.raise_for_status()
             data = res.json()
-            return data.get("Table", [])
+            
+            if isinstance(data, dict):
+                return data.get("Table", []) or data.get("Table1", [])
+            return []
         except Exception as e:
             logging.error(f"Failed to fetch BSE data (scrip='{scrip_cd}'): {e}")
             return []
 
     def classify_announcement_details(self, combined_text: str) -> tuple[str, str, str]:
-        """Returns (Display_Category, Target_Tab, Route_Channel_Group)"""
         text = combined_text.lower()
         
         # 1. Orders & Expansion
@@ -352,7 +362,7 @@ class MasterAutomationEngine:
             if not headline or headline in processed_headlines:
                 continue
 
-            # Strict Time Check
+            # Time Window Check
             news_dt_str = str(ann.get('NEWS_DT', ''))
             try:
                 clean_date_str = news_dt_str.split('.')[0]
@@ -362,11 +372,9 @@ class MasterAutomationEngine:
             except Exception:
                 pass
 
-            # Exclude generic noise and SAST Regulations 29 & 10
             if is_noise(combined_text):
                 continue
 
-            # Strict match against Regulation 30 target categories
             if not any(tag in combined_text for tag in EXACT_TARGET_TAGS):
                 continue
 
