@@ -17,7 +17,6 @@ warnings.filterwarnings("ignore")
 
 load_dotenv()
 
-# Telegram Channel Tokens & IDs
 TELEGRAM_BOT_TOKEN_ANN = os.getenv("TELEGRAM_BOT_TOKEN_ANN")
 TELEGRAM_CHAT_ID_ANN = os.getenv("TELEGRAM_CHAT_ID_ANN")
 
@@ -34,43 +33,48 @@ CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
 STATE_FILE = "master_automation_state.json"
 
-# TARGETED BSE REGULATION 30 TAGS & KEYWORDS (INCLUDES FINANCIAL RESULTS VARIATIONS)
+# TARGETED REGULATION 30 SUB-CATEGORIES
 EXACT_TARGET_TAGS = [
-    # Financial Results (Catches: Board Meeting Outcome - Financial Results, Unaudited Financial Results, etc.)
+    # Orders & Expansion
+    "award_of_order_receipt_of_order",
+    "award of order",
+    "receipt of order",
+    "incorporation of subsidiary",
+    "press release / media release",
+    "announcement under reg 30_new aoa moa",
+    
+    # Financial Results
     "financial results",
     "financial result",
     "board meeting outcome - financial results",
     
     # Investor Meets & Calls
     "analyst / investor meet - outcome",
-    
-    # Corporate & Expansion Updates
-    "incorporation of subsidiary",
-    "award_of_order_receipt_of_order",
-    "acquisition",
-    "press release / media release",
-    "announcement under reg 30_new aoa moa",
+    "investor presentation",
+    "earnings call transcript",
     
     # Capital & Governance Updates
     "bonus / stock split / rights issue",
     "dividend updates",
     "credit rating",
     "change in management",
+    "change in directorate",
+    "resignation",
     "buyback",
     "fund raising",
     "issue of securities",
     "scheme of arrangement",
-    "demerger",
-    "investor presentation",
-    "earnings call transcript",
-    "change in directorate",
-    "resignation"
+    "demerger"
 ]
 
+# NOISE & SAST EXCLUSION FILTERS
 NOISE_KEYWORDS = [
     "trading window", "share certificate", "loss of share",
     "duplicate share", "compliance certificate", "newspaper publication",
-    "clarification", "voting results", "scrutinizer report", "loss of certificate"
+    "clarification", "voting results", "scrutinizer report", "loss of certificate",
+    # SAST Disclosures to Ignore Completely
+    "substantial acquisition", "takeovers", "regulation 29", "regulation 10", 
+    "reg 29", "reg 10", "reg 29(2)", "reg 10(6)", "sast"
 ]
 
 def is_noise(combined_text=""):
@@ -98,22 +102,19 @@ class MasterAutomationEngine:
         self._worksheet_cache = {}
 
     def _connect_sheets_with_retry(self, max_retries=5):
-        """Retries opening Google Sheet with exponential backoff on 503 errors."""
         for attempt in range(1, max_retries + 1):
             try:
                 sheet = self.gc.open(GOOGLE_SHEET_NAME)
-                logging.info(f"Successfully connected to Google Sheet: '{GOOGLE_SHEET_NAME}'")
+                logging.info(f"Connected to Google Sheet: '{GOOGLE_SHEET_NAME}'")
                 return sheet
             except APIError as e:
                 if attempt == max_retries:
-                    logging.error(f"Failed to connect to Google Sheets after {max_retries} attempts.")
                     raise e
                 wait_time = attempt * 5
-                logging.warning(f"Google API Error (503/Server Error). Retrying connection in {wait_time}s... (Attempt {attempt}/{max_retries})")
+                logging.warning(f"Google API Error (503). Retrying in {wait_time}s... ({attempt}/{max_retries})")
                 time.sleep(wait_time)
 
     def load_last_run_time(self) -> datetime:
-        """Loads last run timestamp from state file or defaults to 2 days ago."""
         if os.path.exists(STATE_FILE):
             try:
                 with open(STATE_FILE, "r") as f:
@@ -122,12 +123,9 @@ class MasterAutomationEngine:
                         return datetime.fromisoformat(data["last_run_iso"])
             except Exception as e:
                 logging.warning(f"Could not read state file: {e}")
-        
-        # Default fallback window if no state file exists
         return datetime.now() - timedelta(days=2)
 
     def save_last_run_time(self, run_time: datetime):
-        """Saves current run timestamp to state file for the next execution."""
         try:
             with open(STATE_FILE, "w") as f:
                 json.dump({"last_run_iso": run_time.isoformat()}, f, indent=2)
@@ -148,15 +146,6 @@ class MasterAutomationEngine:
         self._worksheet_cache[tab_name] = ws
         return ws
 
-    def get_target_tab_name(self, category: str) -> str:
-        if category == "Financial Results":
-            return "Results"
-        elif category in ["Expansion / Order / M&A", "Securities & Capital"]:
-            return "Expansion"
-        elif category == "Concall / Investor Meet":
-            return "Concall"
-        return "Log"
-
     def get_scan_mode(self) -> str:
         if not self.settings_sheet:
             return "WATCHLIST"
@@ -164,7 +153,7 @@ class MasterAutomationEngine:
             val = str(self.settings_sheet.acell("B1").value).strip().upper()
             return "ALL_STOCKS" if val == "ALL_STOCKS" else "WATCHLIST"
         except Exception as e:
-            logging.error(f"Error reading Scan Mode setting: {e}")
+            logging.error(f"Error reading Scan Mode: {e}")
             return "WATCHLIST"
 
     def get_watchlist(self) -> dict:
@@ -207,7 +196,7 @@ class MasterAutomationEngine:
             except gspread.exceptions.WorksheetNotFound:
                 continue
             except Exception as e:
-                logging.error(f"Error reading logs from tab '{tab_name}': {e}")
+                logging.error(f"Error reading logs from '{tab_name}': {e}")
                 
         return processed
 
@@ -227,55 +216,50 @@ class MasterAutomationEngine:
             logging.error(f"Failed to fetch BSE data (scrip='{scrip_cd}'): {e}")
             return []
 
-    def classify_news_strict(self, combined_text: str) -> str:
+    def classify_announcement_details(self, combined_text: str) -> tuple[str, str, str]:
+        """Returns (Display_Category, Target_Tab, Route_Channel_Group)"""
         text = combined_text.lower()
         
-        # 1. Financial Results -> Results Tab & Channel
-        if any(k in text for k in ["financial result", "financial results"]):
-            return "Financial Results"
-            
-        # 2. Concall / Investor Meet -> Concall Tab & Channel
-        if "analyst / investor meet - outcome" in text or "investor meet" in text:
-            return "Concall / Investor Meet"
-            
-        # 3. Orders / M&A / Expansion -> Expansion Tab & Channel
-        if any(tag in text for tag in [
-            "award_of_order_receipt_of_order", 
-            "acquisition", 
-            "incorporation of subsidiary"
-        ]):
-            return "Expansion / Order / M&A"
-            
-        # 4. Securities & Capital Actions -> Expansion Tab & Channel
+        # 1. Orders & Expansion
+        if any(k in text for k in ["award_of_order_receipt_of_order", "award of order", "receipt of order"]):
+            return "Award_of_Order_Receipt_of_Order", "Expansion", "CE"
+        if "incorporation of subsidiary" in text:
+            return "Incorporation of Subsidiary", "Expansion", "CE"
         if "bonus / stock split / rights issue" in text:
-            return "Securities & Capital"
+            return "Bonus / Stock Split / Rights Issue", "Expansion", "CE"
+        if "buyback" in text:
+            return "Buyback", "Expansion", "CE"
+        if "fund raising" in text or "issue of securities" in text:
+            return "Fund Raising / Securities", "Expansion", "CE"
 
-        # 5. Dividend Updates -> Log Tab & Main Channel
+        # 2. Financial Results
+        if any(k in text for k in ["financial result", "financial results"]):
+            return "Financial Results", "Results", "RES"
+
+        # 3. Concalls & Investor Meets
+        if any(k in text for k in ["analyst / investor meet - outcome", "earnings call transcript", "investor presentation"]):
+            return "Concall / Investor Meet", "Concall", "CC"
+
+        # 4. Other Reg 30 Filings
         if "dividend updates" in text:
-            return "Dividend Update"
-
-        # 6. Change in Management -> Log Tab & Main Channel
-        if "change in management" in text:
-            return "Management Change"
-            
-        # 7. Credit Rating -> Log Tab & Main Channel
+            return "Dividend Update", "Log", "ANN"
         if "credit rating" in text:
-            return "Credit Rating"
+            return "Credit Rating", "Log", "ANN"
+        if "change in management" in text or "change in directorate" in text:
+            return "Change in Management", "Log", "ANN"
+        if "press release / media release" in text:
+            return "Press Release", "Log", "ANN"
 
-        # 8. Press Releases & Corporate MoA Updates -> Log Tab & Main Channel
-        if "press release / media release" in text or "announcement under reg 30_new aoa moa" in text:
-            return "Press / Corporate Release"
+        return "General Announcement", "Log", "ANN"
 
-        return "General Announcement"
-
-    def get_channel_credentials(self, category: str):
-        if category == "Financial Results":
+    def get_channel_credentials(self, route_group: str):
+        if route_group == "RES":
             token = TELEGRAM_BOT_TOKEN_RES or TELEGRAM_BOT_TOKEN_ANN
             chat_id = TELEGRAM_CHAT_ID_RES or TELEGRAM_CHAT_ID_ANN
-        elif category in ["Expansion / Order / M&A", "Securities & Capital"]:
+        elif route_group == "CE":
             token = TELEGRAM_BOT_TOKEN_CE or TELEGRAM_BOT_TOKEN_ANN
             chat_id = TELEGRAM_CHAT_ID_CE or TELEGRAM_CHAT_ID_ANN
-        elif category == "Concall / Investor Meet":
+        elif route_group == "CC":
             token = TELEGRAM_BOT_TOKEN_CC or TELEGRAM_BOT_TOKEN_ANN
             chat_id = TELEGRAM_CHAT_ID_CC or TELEGRAM_CHAT_ID_ANN
         else:
@@ -284,11 +268,11 @@ class MasterAutomationEngine:
             
         return token, chat_id
 
-    def send_telegram_alert(self, scrip_cd: str, stock_name: str, category: str, headline: str, pdf_url: str, stock_info: dict = None):
-        bot_token, chat_id = self.get_channel_credentials(category)
+    def send_telegram_alert(self, scrip_cd: str, stock_name: str, display_category: str, route_group: str, headline: str, pdf_url: str, stock_info: dict = None):
+        bot_token, chat_id = self.get_channel_credentials(route_group)
         
         if not bot_token or not chat_id:
-            logging.warning(f"No valid Telegram credentials for category '{category}'. Skipping alert.")
+            logging.warning(f"No Telegram credentials for group '{route_group}'. Skipping alert.")
             return
 
         metrics_block = ""
@@ -304,8 +288,8 @@ class MasterAutomationEngine:
 
         text = (
             f"⚡ <b>High-Impact Stock Alert</b>\n\n"
-            f"<b>Company:</b> {stock_name} (<code>{scrip_cd}</code>)\n"
-            f"<b>Category:</b> {category}\n\n"
+            f"<b>Company:</b> {stock_name} - {scrip_cd}\n"
+            f"<b>Category:</b> {display_category}\n\n"
             f"{metrics_block}"
             f"<b>Headline:</b> {headline}\n"
         )
@@ -324,14 +308,13 @@ class MasterAutomationEngine:
         try:
             requests.post(url, json=payload, timeout=10)
         except Exception as e:
-            logging.error(f"Failed to send Telegram alert for {category}: {e}")
+            logging.error(f"Failed to send Telegram alert for {display_category}: {e}")
 
     def run(self):
         run_start_time = datetime.now()
         mode = self.get_scan_mode()
         processed_headlines = self.get_processed_headlines()
         
-        # Load state checkpoint (e.g., last run time)
         cutoff_time = self.load_last_run_time()
 
         logging.info(f"=== Running Automation Engine in [{mode}] Mode ===")
@@ -369,7 +352,7 @@ class MasterAutomationEngine:
             if not headline or headline in processed_headlines:
                 continue
 
-            # Strict Time Window Check: Ignore announcements older than or equal to last run checkpoint
+            # Strict Time Check
             news_dt_str = str(ann.get('NEWS_DT', ''))
             try:
                 clean_date_str = news_dt_str.split('.')[0]
@@ -379,34 +362,33 @@ class MasterAutomationEngine:
             except Exception:
                 pass
 
-            # STRICT CHECK: Match ONLY the specified target tags
-            if not any(tag in combined_text for tag in EXACT_TARGET_TAGS):
-                continue
-
+            # Exclude generic noise and SAST Regulations 29 & 10
             if is_noise(combined_text):
                 continue
 
-            category = self.classify_news_strict(combined_text)
+            # Strict match against Regulation 30 target categories
+            if not any(tag in combined_text for tag in EXACT_TARGET_TAGS):
+                continue
+
+            display_cat, target_tab, route_group = self.classify_announcement_details(combined_text)
 
             attachment = ann.get('ATTACHMENTNAME')
             pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}" if attachment else ""
             details = "⏳ PENDING" if pdf_url else "No PDF available."
 
-            target_tab_name = self.get_target_tab_name(category)
-            logging.info(f"[{mode}] Alerting ({category} -> Tab: '{target_tab_name}'): {company_name} - {headline}")
+            logging.info(f"[{mode}] Alerting ({display_cat} -> Tab: '{target_tab}'): {company_name} - {headline}")
 
             try:
-                target_sheet = self.get_or_create_worksheet(target_tab_name)
-                target_sheet.append_row([news_dt_str, scrip_cd, category, headline, details, pdf_url])
+                target_sheet = self.get_or_create_worksheet(target_tab)
+                target_sheet.append_row([news_dt_str, scrip_cd, display_cat, headline, details, pdf_url])
                 
                 processed_headlines.add(headline)
-                self.send_telegram_alert(scrip_cd, company_name, category, headline, pdf_url, stock_info)
+                self.send_telegram_alert(scrip_cd, company_name, display_cat, route_group, headline, pdf_url, stock_info)
                 new_count += 1
                 time.sleep(1.5)
             except Exception as e:
                 logging.error(f"Failed to log/alert: {e}")
 
-        # Update checkpoint file upon successful execution completion
         self.save_last_run_time(run_start_time)
         logging.info(f"Finished run. Processed {new_count} new announcements. Checkpoint set to {run_start_time.strftime('%Y-%m-%d %H:%M:%S')}.")
 
