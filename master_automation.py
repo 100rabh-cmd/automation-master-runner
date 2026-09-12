@@ -33,12 +33,16 @@ TELEGRAM_CHAT_ID_CE = os.getenv("TELEGRAM_CHAT_ID_CE")
 TELEGRAM_BOT_TOKEN_CC = os.getenv("TELEGRAM_BOT_TOKEN_CC")
 TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
-CATEGORIES_TO_SCAN = [
-    "Company Update",
-    "Result",
-    "Analyst / Investor Meet",
-    "Corporate Action"
-]
+# Exact mapping based on BSE Dropdown Categories & Subcategories
+TARGET_FETCH_LIST = [
+    {"strCat": "Company Update", "subcategory": "Award of Order / Receipt of Order"},
+    {"strCat": "Company Update", "subcategory": "Analyst / Investor Meet"},
+    {"strCat": "Company Update", "subcategory": "Earnings Call Transcript"},
+    {"strCat": "Result", "subcategory": "Financial Results"},
+    {"strCat": "Corp. Action", "subcategory": "-1"},
+    {"strCat": "Company Update", "subcategory": "Capacity addition (Sub-para 3-Para B)"},
+    {"strCat": "Company Update", "subcategory": "Acquisition"},
+}
 
 EXPANSION_ORDERS_KEYWORDS = [
     "expansion", "capacity", "commercial production", "commissioning",
@@ -118,16 +122,15 @@ class MasterAutomationEngine:
         except Exception as e:
             logging.error(f"Error saving state: {e}")
 
-    def fetch_bse_by_curl(self, category: str) -> list:
-        encoded_cat = quote(category)
-        url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnCategoryData/w?pageno=1&strCat={encoded_cat}&strPrevDate=&strScrip=&strSearch=D&strToDate=&strType=C"
+    def fetch_bse_subcategories_by_curl(self, str_cat: str, subcategory: str) -> list:
+        url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat={quote(str_cat)}&strPrevDate=&strScrip=&strSearch=C&strToDate=&strType=C&subcategory={quote(subcategory)}"
         
         cmd = [
             "curl", "-s", "-L",
             "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "-H", "Accept: application/json, text/plain, */*",
             "-H", "Referer: https://www.bseindia.com/",
-            "--max-time", "10",
+            "--max-time", "12",
             url
         ]
         
@@ -136,7 +139,6 @@ class MasterAutomationEngine:
             output = res.stdout.strip()
             
             if not output or not output.startswith(("{", "[")):
-                logging.warning(f"BSE category '{category}' fetch returned empty or invalid response.")
                 return []
 
             data = json.loads(output)
@@ -146,7 +148,7 @@ class MasterAutomationEngine:
                 return data
             return []
         except Exception as e:
-            logging.error(f"Failed fetching category '{category}' via curl: {e}")
+            logging.error(f"Failed fetching {str_cat} -> {subcategory} via curl: {e}")
             return []
 
     def fetch_screener_concalls(self) -> list:
@@ -284,10 +286,13 @@ class MasterAutomationEngine:
             self.seen_ids.add(item['unique_key'])
             self.save_seen_ids()
 
-        for category in CATEGORIES_TO_SCAN:
-            logging.info(f"Scanning BSE category: '{category}'...")
-            announcements = self.fetch_bse_by_curl(category)
-            logging.info(f"Fetched {len(announcements)} records for category '{category}'.")
+        for target in TARGET_FETCH_LIST:
+            str_cat = target["strCat"]
+            subcat = target["subcategory"]
+            logging.info(f"Scanning BSE Category: '{str_cat}' -> Subcategory: '{subcat}'...")
+            
+            announcements = self.fetch_bse_subcategories_by_curl(str_cat, subcat)
+            logging.info(f"Fetched {len(announcements)} records.")
 
             for ann in announcements:
                 scrip_cd = str(ann.get('SCRIP_CD', ann.get('Scrip_CD', ann.get('NEWS_CODE', '')))).strip()
