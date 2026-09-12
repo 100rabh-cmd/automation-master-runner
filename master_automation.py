@@ -135,15 +135,38 @@ class MasterAutomationEngine:
             logging.error(f"Error saving state: {e}")
 
     def fetch_all_bse_announcements(self) -> list:
-        """Fetches live corporate announcements across ALL BSE listed companies."""
-        url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip=&strSearch=P&strToDate=&strType=C"
+        """Fetches live corporate announcements across ALL BSE listed companies with date filters."""
+        today_str = datetime.now().strftime("%Y%m%d")
+        # Look back 3 days to catch Friday/weekend filings
+        prev_str = (datetime.now() - timedelta(days=3)).strftime("%Y%m%d")
+
+        url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate={prev_str}&strScrip=&strSearch=P&strToDate={today_str}&strType=C"
+        
         try:
+            # Re-verify session headers to bypass basic Cloudflare/IP checks on GitHub Actions
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Origin': 'https://www.bseindia.com',
+                'Referer': 'https://www.bseindia.com/corporates/ann.html'
+            })
+
             res = self.session.get(url, timeout=15)
-            res.raise_for_status()
-            return res.json().get("Table", [])
+            logging.info(f"BSE API Status Code: {res.status_code}")
+            
+            if res.status_code != 200:
+                logging.error(f"BSE API Error Payload: {res.text[:200]}")
+                return []
+
+            data = res.json()
+            announcements = data.get("Table", [])
+            logging.info(f"Successfully retrieved {len(announcements)} BSE filings.")
+            return announcements
+
         except Exception as e:
             logging.error(f"Failed to fetch market-wide BSE announcements: {e}")
             return []
+            
 
     def fetch_screener_concalls(self) -> list:
         try:
