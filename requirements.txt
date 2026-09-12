@@ -1,3 +1,4 @@
+curl_cffi>=0.5.10
 requests
 beautifulsoup4
 python-dotenv
