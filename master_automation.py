@@ -42,6 +42,12 @@ TARGET_FETCH_LIST = [
     },
     {
         "strCat": "Company Update",
+        "subcategory": "Letter of Intent (LOI)",
+        "sheet_tab": "Award_of_Order_Receipt_of_Order",
+        "route_group": "CE",
+    },
+    {
+        "strCat": "Company Update",
         "subcategory": "Analyst / Investor Meet",
         "sheet_tab": "Concalls",
         "route_group": "CC",
@@ -101,7 +107,8 @@ NOISE_KEYWORDS = [
     "compliance certificate", "newspaper publication", "clarification", 
     "voting results", "scrutinizer report", "loss of certificate",
     "regulation 29", "regulation 10", "reg 29", "reg 10", "reg 29(2)", "reg 10(6)", "sast",
-    "postal ballot", "annual report", "dividend"
+    "postal ballot", "annual report", "dividend", "cut-off date", "e-voting", 
+    "annual general meeting", "agm", "book closure", "share purchase agreement", "spa"
 ]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -265,7 +272,7 @@ class MasterAutomationEngine:
             f"📲 Follow: @financewith100rabh"
         )
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true}
         try:
             requests.post(url, json=payload, timeout=5)
         except Exception as e:
@@ -342,13 +349,18 @@ class MasterAutomationEngine:
                 news_sub = str(ann.get('NEWSSUB', ann.get('CATEGORYNAME', ''))).strip()
                 combined = f"{news_sub} {headline}"
 
-                # Noise filter check
                 t_lower = combined.lower()
+
+                # Global noise filter check (AGM, E-voting, Book Closure, SPA, etc.)
                 if any(k in t_lower for k in NOISE_KEYWORDS):
                     continue
 
-                # Specific exclusion for Award of Order / Receipt of Order containing GST
+                # Specific exclusion: GST containing orders for Award of Order tab
                 if target_tab == "Award_of_Order_Receipt_of_Order" and "gst" in t_lower:
+                    continue
+
+                # Specific filter for Concalls: Only keep if it contains outcome/transcript info, skip pure advance intimations
+                if subcat == "Analyst / Investor Meet" and ("intimation" in t_lower and "outcome" not in t_lower and "transcript" not in t_lower and "audio" not in t_lower and "recording" not in t_lower):
                     continue
 
                 attachment = ann.get('ATTACHMENTNAME', ann.get('AttachmentName', ann.get('ATTACHMENT_NAME', '')))
