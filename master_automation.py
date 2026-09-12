@@ -644,48 +644,55 @@ class MasterAutomationEngine:
             
         return token, chat_id
 
-    def send_telegram_alert(self, scrip_cd: str, stock_name: str, display_category: str, route_group: str, headline: str, pdf_url: str, stock_info: dict = None):
-        bot_token, chat_id = self.get_channel_credentials(route_group)
-        
-        if not bot_token or not chat_id:
-            logging.warning(f"No Telegram credentials for group '{route_group}'. Skipping alert.")
+   def send_telegram_alert(self, company: str, ticker: str, headline: str, pdf_url: str, route_group: str, stock_info: dict = None):
+        bot_tokens = {
+            "CE": TELEGRAM_BOT_TOKEN_CE or TELEGRAM_BOT_TOKEN_ANN,
+            "RES": TELEGRAM_BOT_TOKEN_RES or TELEGRAM_BOT_TOKEN_ANN,
+            "CC": TELEGRAM_BOT_TOKEN_CC or TELEGRAM_BOT_TOKEN_ANN,
+            "ANN": TELEGRAM_BOT_TOKEN_ANN
+        }
+        chat_ids = {
+            "CE": TELEGRAM_CHAT_ID_CE or TELEGRAM_CHAT_ID_ANN,
+            "RES": TELEGRAM_CHAT_ID_RES or TELEGRAM_CHAT_ID_ANN,
+            "CC": TELEGRAM_CHAT_ID_CC or TELEGRAM_CHAT_ID_ANN,
+            "ANN": TELEGRAM_CHAT_ID_ANN
+        }
+
+        token = bot_tokens.get(route_group)
+        chat_id = chat_ids.get(route_group)
+        if not token or not chat_id:
             return
 
-        metrics_block = ""
-        if stock_info:
-            price = stock_info.get('price', 'N/A')
-            mcap = stock_info.get('mcap', 'N/A')
-            pe = stock_info.get('pe', 'N/A')
-            if price != "N/A" or mcap != "N/A":
-                metrics_block = (
-                    f"📊 <b>Stock Snapshot:</b>\n"
-                    f"• Price: ₹{price} | Mcap: ₹{mcap} Cr | P/E: {pe}\n\n"
-                )
+        snapshot_block = ""
+        if stock_info and stock_info.get("price") != "N/A":
+            snapshot_block = (
+                f"📊 <b>Stock Snapshot:</b>\n"
+                f"• <b>Price:</b> ₹{stock_info['price']} | <b>Mcap:</b> ₹{stock_info['mcap']} Cr | <b>P/E:</b> {stock_info['pe']}\n\n"
+            )
+
+        tag_labels = {
+            "CE": "🏭 Capacity Expansion", 
+            "RES": "📊 Financial Results", 
+            "CC": "🎙️ Concall / Presentation", 
+            "ANN": "⚡ Corporate Update"
+        }
+        label = tag_labels.get(route_group, "⚡ Alert")
 
         text = (
-            f"⚡ <b>High-Impact Stock Alert</b>\n\n"
-            f"<b>Company:</b> {stock_name} - {scrip_cd}\n"
-            f"<b>Category:</b> {display_category}\n\n"
-            f"{metrics_block}"
-            f"<b>Headline:</b> {headline}\n"
+            f"<b>{label}!</b>\n\n"
+            f"📌 <b>Company:</b> {html.escape(company)} (<code>{ticker}</code>)\n\n"
+            f"{snapshot_block}"
+            f"📝 <b>Headline:</b> {html.escape(headline)}\n\n"
+            f"📄 <b>PDF Document:</b> {pdf_url}\n\n"
+            f"📲 Follow: @financewith100rabh"
         )
-        if pdf_url:
-            text += f"\n📄 <b>PDF Document:</b> {pdf_url}"
-
-        text += "\n\n📲 Follow: @financewith100rabh"
-
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
-        }
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         try:
             requests.post(url, json=payload, timeout=10)
         except Exception as e:
-            logging.error(f"Failed to send Telegram alert for {display_category}: {e}")
-
+            logging.error(f"Telegram alert error: {e}")
+            
     def run(self):
         run_start_time = datetime.now()
         mode = self.get_scan_mode()
