@@ -272,7 +272,7 @@ class MasterAutomationEngine:
             f"📲 Follow: @financewith100rabh"
         )
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": true}
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         try:
             requests.post(url, json=payload, timeout=5)
         except Exception as e:
@@ -351,15 +351,12 @@ class MasterAutomationEngine:
 
                 t_lower = combined.lower()
 
-                # Global noise filter check (AGM, E-voting, Book Closure, SPA, etc.)
                 if any(k in t_lower for k in NOISE_KEYWORDS):
                     continue
 
-                # Specific exclusion: GST containing orders for Award of Order tab
                 if target_tab == "Award_of_Order_Receipt_of_Order" and "gst" in t_lower:
                     continue
 
-                # Specific filter for Concalls: Only keep if it contains outcome/transcript info, skip pure advance intimations
                 if subcat == "Analyst / Investor Meet" and ("intimation" in t_lower and "outcome" not in t_lower and "transcript" not in t_lower and "audio" not in t_lower and "recording" not in t_lower):
                     continue
 
