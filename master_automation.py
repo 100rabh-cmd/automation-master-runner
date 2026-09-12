@@ -6,42 +6,33 @@ import logging
 import warnings
 import html
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import gspread
-from gspread.exceptions import APIError, WorksheetNotFound
+from gspread.exceptions import WorksheetNotFound
 from oauth2client.service_account import ServiceAccountCredentials
 
 warnings.filterwarnings("ignore")
 load_dotenv()
 
-# ==============================================================================
-# ------------------------- CONFIGURATION HEADER -------------------------------
-# ==============================================================================
-
+# Configuration
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
 STATE_FILE = "last_seen_master.json"
 
+WATCHLIST_TAB = "Watchlist"
 SCREENER_CONCALL_URL = "https://www.screener.in/announcements/user-filters/223297/"
 
-# Telegram Environment Variables
 TELEGRAM_BOT_TOKEN_ANN = os.getenv("TELEGRAM_BOT_TOKEN_ANN")
 TELEGRAM_CHAT_ID_ANN = os.getenv("TELEGRAM_CHAT_ID_ANN")
-
 TELEGRAM_BOT_TOKEN_RES = os.getenv("TELEGRAM_BOT_TOKEN_RES")
 TELEGRAM_CHAT_ID_RES = os.getenv("TELEGRAM_CHAT_ID_RES")
-
 TELEGRAM_BOT_TOKEN_CE = os.getenv("TELEGRAM_BOT_TOKEN_CE")
 TELEGRAM_CHAT_ID_CE = os.getenv("TELEGRAM_CHAT_ID_CE")
-
 TELEGRAM_BOT_TOKEN_CC = os.getenv("TELEGRAM_BOT_TOKEN_CC")
 TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
-BSE_PROXY_URL = os.getenv("BSE_PROXY_URL") or os.getenv("HTTPS_PROXY")
-
-# Categorization Keywords
 EXPANSION_KEYWORDS = [
     "expansion", "capacity", "commercial production", "commissioning",
     "new plant", "new facility", "setting up", "capacity addition", 
@@ -70,13 +61,8 @@ NOISE_KEYWORDS = [
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ==============================================================================
-# ------------------------- MASTER AUTOMATION ENGINE ---------------------------
-# ==============================================================================
-
 class MasterAutomationEngine:
     def __init__(self):
-        self.session = self._init_bse_session()
         self.gc = self._connect_sheets_with_retry()
         self.sh = self.gc.open(GOOGLE_SHEET_NAME)
         self.seen_ids = self.load_seen_ids()
@@ -92,26 +78,40 @@ class MasterAutomationEngine:
                     raise e
                 time.sleep(attempt * 3)
 
-    def _init_bse_session(self) -> requests.Session:
-        session = requests.Session()
-        if BSE_PROXY_URL:
-            session.proxies = {"http": BSE_PROXY_URL, "https": BSE_PROXY_URL}
-
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://www.bseindia.com/corporates/ann.html',
-            'Origin': 'https://www.bseindia.com',
-        })
-
-        # Establishes session cookies prior to API queries
+    def get_watchlist() -> dict:
         try:
-            session.get("https://www.bseindia.com/corporates/ann.html", timeout=10)
+            ws = self.sh.worksheet(WATCHLIST_TAB)
+            records = ws.get_all_records()
+            watchlist = {}
+            for r in records:
+                active_flag = str(r.get('Active', 'yes')).strip().lower()
+                if active_flag in ['yes', 'true', '1']:
+                    ticker = str(r.get('Ticker', '')).strip()
+                    clean_code = ticker.replace("BOM:", "").replace("NSE:", "").strip()
+                    if clean_code.isdigit():
+                        watchlist[clean_code] = {
+                            "company": str(r.get('Stock Name', r.get('Company Name', 'Unknown'))).strip(),
+                            "ticker_formatted": f"BOM:{clean_code}"
+                        }
+            return watchlist
         except Exception as e:
-            logging.warning(f"BSE session handshake warning: {e}")
+            logging.error(f"Error loading Watchlist: {e}")
+            return {}
 
-        return session
+    def fetch_bse_announcements(self, scrip_cd: str) -> list:
+        url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=&strScrip={scrip_cd}&strSearch=P&strToDate=&strType=C"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://www.bseindia.com/',
+            'Accept': 'application/json, text/plain, */*'
+        }
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            res.raise_for_status()
+            return res.json().get("Table", [])
+        except Exception as e:
+            logging.error(f"Failed to fetch BSE announcements for scrip {scrip_cd}: {e}")
+            return []
 
     def load_seen_ids(self) -> set:
         seen = set()
@@ -141,49 +141,6 @@ class MasterAutomationEngine:
                 json.dump(list(self.seen_ids)[-1000:], f)
         except Exception as e:
             logging.error(f"Error saving state: {e}")
-
-    def fetch_all_bse_announcements(self) -> list:
-        """Fetches live corporate announcements across all BSE listed stocks."""
-        now = datetime.now()
-        three_days_ago = now - timedelta(days=3)
-        
-        dt_ymd_today = now.strftime("%Y%m%d")
-        dt_ymd_prev = three_days_ago.strftime("%Y%m%d")
-        dt_slash_today = now.strftime("%d/%m/%Y")
-        dt_slash_prev = three_days_ago.strftime("%d/%m/%Y")
-
-        candidates = [
-            f"https://api.bseindia.com/BseIndiaAPI/api/AnnCategoryData/w?pageno=1&strCat=-1&strPrevDate={dt_ymd_prev}&strScrip=&strSearch=D&strToDate={dt_ymd_today}&strType=C",
-            f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate={dt_ymd_prev}&strScrip=&strSearch=D&strToDate={dt_ymd_today}&strType=C",
-            f"https://api.bseindia.com/BseIndiaAPI/api/AnnCategoryData/w?pageno=1&strCat=-1&strPrevDate={dt_slash_prev}&strScrip=&strSearch=D&strToDate={dt_slash_today}&strType=C"
-        ]
-
-        for idx, url in enumerate(candidates, 1):
-            try:
-                res = self.session.get(url, timeout=12)
-                logging.info(f"Checking BSE Endpoint #{idx} | Status: {res.status_code}")
-                if res.status_code == 200:
-                    try:
-                        data = res.json()
-                    except Exception:
-                        logging.warning(f"Endpoint #{idx} returned HTML/Captcha response.")
-                        continue
-
-                    items = []
-                    if isinstance(data, dict):
-                        items = data.get("Table") or data.get("Table1") or data.get("Table2") or []
-                    elif isinstance(data, list):
-                        items = data
-
-                    if items:
-                        logging.info(f"Successfully fetched {len(items)} announcements across market.")
-                        return items
-            except Exception as e:
-                logging.error(f"Error querying BSE candidate #{idx}: {e}")
-                continue
-
-        logging.warning("All market-wide BSE endpoints returned 0 results.")
-        return []
 
     def fetch_screener_concalls(self) -> list:
         try:
@@ -306,7 +263,7 @@ class MasterAutomationEngine:
         ], index=2, value_input_option="USER_ENTERED")
 
     def run(self):
-        logging.info("Starting global market scanning engine...")
+        logging.info("Starting master scanning engine...")
 
         # 1. Process Screener Concalls
         screener_items = self.fetch_screener_concalls()
@@ -318,33 +275,34 @@ class MasterAutomationEngine:
             self.seen_ids.add(item['unique_key'])
             self.save_seen_ids()
 
-        # 2. Process ALL BSE Corporate Announcements Across Market
-        announcements = self.fetch_all_bse_announcements()
-        for ann in announcements:
-            scrip_cd = str(ann.get('SCRIP_CD', ann.get('Scrip_CD', ann.get('NEWS_CODE', '')))).strip()
-            company_name = str(ann.get('SLONGNAME', ann.get('COMPANY_NAME', ann.get('sname', ann.get('SNAME', 'Unknown'))))).strip()
-            ticker_fmt = f"BOM:{scrip_cd}" if scrip_cd else ""
+        # 2. Process BSE Announcements using exact scrip-wise fetch
+        watchlist = self.get_watchlist()
+        logging.info(f"Scanning BSE announcements for {len(watchlist)} active stocks...")
 
-            headline = str(ann.get('HEADLINE', ann.get('NEWSSUB', ann.get('TITLE', '')))).strip()
-            news_sub = str(ann.get('NEWSSUB', ann.get('CATEGORYNAME', ''))).strip()
-            combined = f"{news_sub} {headline}"
+        for scrip_cd, info in watchlist.items():
+            announcements = self.fetch_bse_announcements(scrip_cd)
+            for ann in announcements:
+                headline = str(ann.get('HEADLINE', ann.get('NEWSSUB', ''))).strip()
+                news_sub = str(ann.get('NEWSSUB', ann.get('CATEGORYNAME', ''))).strip()
+                combined = f"{news_sub} {headline}"
 
-            target_tab, route_group = self.classify_announcement(combined)
-            if not target_tab:
-                continue
+                target_tab, route_group = self.classify_announcement(combined)
+                if not target_tab:
+                    continue
 
-            attachment = ann.get('ATTACHMENTNAME', ann.get('AttachmentName', ann.get('ATTACHMENT_NAME', '')))
-            pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}" if attachment else ""
-            unique_key = pdf_url if pdf_url else f"{scrip_cd}_{headline}"
+                attachment = ann.get('ATTACHMENTNAME', ann.get('AttachmentName', ''))
+                pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}" if attachment else ""
+                unique_key = pdf_url if pdf_url else f"{scrip_cd}_{headline}"
 
-            if unique_key in self.seen_ids:
-                continue
+                if unique_key in self.seen_ids:
+                    continue
 
-            self.write_to_sheet(target_tab, company_name, headline, pdf_url, ticker_fmt)
-            self.send_telegram_alert(company_name, ticker_fmt, headline, pdf_url, route_group)
+                self.write_to_sheet(target_tab, info['company'], headline, pdf_url, info['ticker_formatted'])
+                self.send_telegram_alert(info['company'], info['ticker_formatted'], headline, pdf_url, route_group)
 
-            self.seen_ids.add(unique_key)
-            self.save_seen_ids()
+                self.seen_ids.add(unique_key)
+                self.save_seen_ids()
+                time.sleep(0.5)
 
 if __name__ == "__main__":
     engine = MasterAutomationEngine()
