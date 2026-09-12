@@ -33,7 +33,6 @@ TELEGRAM_CHAT_ID_CE = os.getenv("TELEGRAM_CHAT_ID_CE")
 TELEGRAM_BOT_TOKEN_CC = os.getenv("TELEGRAM_BOT_TOKEN_CC")
 TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
-# Exact mapping based on BSE Dropdown Categories & Subcategories
 TARGET_FETCH_LIST = [
     {"strCat": "Company Update", "subcategory": "Award of Order / Receipt of Order"},
     {"strCat": "Company Update", "subcategory": "Analyst / Investor Meet"},
@@ -42,7 +41,7 @@ TARGET_FETCH_LIST = [
     {"strCat": "Corp. Action", "subcategory": "-1"},
     {"strCat": "Company Update", "subcategory": "Capacity addition (Sub-para 3-Para B)"},
     {"strCat": "Company Update", "subcategory": "Acquisition"},
-}
+]
 
 EXPANSION_ORDERS_KEYWORDS = [
     "expansion", "capacity", "commercial production", "commissioning",
