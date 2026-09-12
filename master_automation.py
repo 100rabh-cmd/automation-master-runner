@@ -147,7 +147,7 @@ class MasterAutomationEngine:
         except Exception as e:
             logging.error(f"Error saving state: {e}")
 
-    def get_watchlist(() -> dict:
+    def get_watchlist(self) -> dict:
         try:
             ws = self.sh.worksheet("Watchlist")
             records = ws.get_all_records()
