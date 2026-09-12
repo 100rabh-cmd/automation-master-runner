@@ -5,13 +5,20 @@ import json
 import logging
 import warnings
 import html
-import requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import gspread
 from gspread.exceptions import APIError, WorksheetNotFound
 from oauth2client.service_account import ServiceAccountCredentials
+
+# TLS Impersonation to bypass BSE Akamai WAF on GitHub Actions
+try:
+    from curl_cffi import requests as curl_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    import requests as curl_requests
+    HAS_CURL_CFFI = False
 
 warnings.filterwarnings("ignore")
 load_dotenv()
@@ -31,9 +38,6 @@ TELEGRAM_CHAT_ID_CE = os.getenv("TELEGRAM_CHAT_ID_CE")
 TELEGRAM_BOT_TOKEN_CC = os.getenv("TELEGRAM_BOT_TOKEN_CC")
 TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
-BSE_PROXY_URL = os.getenv("BSE_PROXY_URL") or os.getenv("HTTPS_PROXY")
-
-# Keywords me MOU, Acquisition, Joint Venture add kar diya gaya hai
 EXPANSION_KEYWORDS = [
     "expansion", "capacity", "commercial production", "commissioning",
     "new plant", "new facility", "setting up", "capacity addition", 
@@ -53,7 +57,6 @@ CONCALL_KEYWORDS = [
     "investor presentation", "analyst presentation", "audio recording", "concall"
 ]
 
-# Filtering non-essential compliance items
 NOISE_KEYWORDS = [
     "trading window", "share certificate", "loss of share", "duplicate share",
     "compliance certificate", "newspaper publication", "clarification", 
@@ -67,7 +70,6 @@ class MasterAutomationEngine:
     def __init__(self):
         self.gc = self._connect_sheets_with_retry()
         self.sh = self.gc.open(GOOGLE_SHEET_NAME)
-        self.session = self._init_bse_session()
         self.seen_ids = self.load_seen_ids()
 
     def _connect_sheets_with_retry(self, max_retries=5):
@@ -80,19 +82,6 @@ class MasterAutomationEngine:
                 if attempt == max_retries:
                     raise e
                 time.sleep(attempt * 3)
-
-    def _init_bse_session(self) -> requests.Session:
-        session = requests.Session()
-        if BSE_PROXY_URL:
-            session.proxies = {"http": BSE_PROXY_URL, "https": BSE_PROXY_URL}
-
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-            'Referer': 'https://www.bseindia.com/corporates/ann.html',
-            'Origin': 'https://www.bseindia.com',
-            'Accept': 'application/json, text/plain, */*'
-        })
-        return session
 
     def load_seen_ids(self) -> set:
         seen = set()
@@ -124,28 +113,39 @@ class MasterAutomationEngine:
             logging.error(f"Error saving state: {e}")
 
     def fetch_all_bse_announcements(self) -> list:
-        """Correct endpoint for entire market filings."""
         now = datetime.now()
         three_days_ago = now - timedelta(days=3)
         
-        dt_slash_today = now.strftime("%d/%m/%Y")
-        dt_slash_prev = three_days_ago.strftime("%d/%m/%Y")
+        # BSE API expects YYYYMMDD format
+        dt_ymd_today = now.strftime("%Y%m%d")
+        dt_ymd_prev = three_days_ago.strftime("%Y%m%d")
 
-        # Working market-wide endpoints
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Origin': 'https://www.bseindia.com',
+            'Referer': 'https://www.bseindia.com/corporates/ann.html',
+        }
+
         candidates = [
-            f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubmissionData/w?pageno=1&strCat=-1&strPrevDate={dt_slash_prev}&strScrip=&strSearch=D&strToDate={dt_slash_today}&strType=C",
-            f"https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w?strCat=-1&strPrevDate={dt_slash_prev}&strScrip=&strSearch=D&strToDate={dt_slash_today}&strType=C"
+            f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate={dt_ymd_prev}&strScrip=&strSearch=D&strToDate={dt_ymd_today}&strType=C",
+            f"https://api.bseindia.com/BseIndiaAPI/api/AnnouncementsList/w?pageno=1&strCat=-1&strPrevDate={dt_ymd_prev}&strScrip=&strSearch=D&strToDate={dt_ymd_today}&strType=C"
         ]
 
         for idx, url in enumerate(candidates, 1):
             try:
-                res = self.session.get(url, timeout=12)
+                if HAS_CURL_CFFI:
+                    res = curl_requests.get(url, headers=headers, impersonate="chrome120", timeout=15)
+                else:
+                    res = curl_requests.get(url, headers=headers, timeout=15)
+
                 logging.info(f"Checking BSE Endpoint #{idx} | Status: {res.status_code}")
                 if res.status_code == 200:
                     try:
                         data = res.json()
-                    except json.JSONDecodeError:
-                        logging.warning(f"Endpoint #{idx} returned non-JSON response.")
+                    except Exception:
+                        logging.warning(f"Endpoint #{idx} returned HTML/Captcha block instead of JSON.")
                         continue
 
                     items = []
@@ -155,7 +155,7 @@ class MasterAutomationEngine:
                         items = data
 
                     if items:
-                        logging.info(f"Successfully fetched {len(items)} announcements.")
+                        logging.info(f"Successfully fetched {len(items)} announcements across market.")
                         return items
             except Exception as e:
                 logging.error(f"Error querying BSE candidate #{idx}: {e}")
@@ -167,7 +167,7 @@ class MasterAutomationEngine:
     def fetch_screener_concalls(self) -> list:
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
-            res = requests.get(SCREENER_CONCALL_URL, headers=headers, timeout=15)
+            res = curl_requests.get(SCREENER_CONCALL_URL, headers=headers, timeout=15)
             if res.status_code != 200:
                 return []
             
@@ -260,7 +260,7 @@ class MasterAutomationEngine:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         try:
-            requests.post(url, json=payload, timeout=10)
+            curl_requests.post(url, json=payload, timeout=10)
         except Exception as e:
             logging.error(f"Telegram alert error: {e}")
 
