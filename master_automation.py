@@ -4,7 +4,6 @@ import time
 import json
 import logging
 import warnings
-import re
 import html
 import requests
 from datetime import datetime, timedelta
@@ -99,7 +98,7 @@ class MasterAutomationEngine:
             session.proxies = {"http": BSE_PROXY_URL, "https": BSE_PROXY_URL}
 
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
             'Referer': 'https://www.bseindia.com/corporates/ann.html',
             'Origin': 'https://www.bseindia.com',
             'Accept': 'application/json, text/plain, */*'
@@ -136,7 +135,7 @@ class MasterAutomationEngine:
             logging.error(f"Error saving state: {e}")
 
     def fetch_all_bse_announcements(self) -> list:
-        """Fetches market-wide BSE announcements with raw diagnostic logging and WAF fallback."""
+        """Har stock ke liye market-wide announcements fetch karta hai."""
         now = datetime.now()
         three_days_ago = now - timedelta(days=3)
         
@@ -144,20 +143,6 @@ class MasterAutomationEngine:
         dt_ymd_prev = three_days_ago.strftime("%Y%m%d")
         dt_slash_today = now.strftime("%d/%m/%Y")
         dt_slash_prev = three_days_ago.strftime("%d/%m/%Y")
-
-        # Enhanced Browser Headers to pass Akamai/Cloudflare checks
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Origin': 'https://www.bseindia.com',
-            'Referer': 'https://www.bseindia.com/corporates/ann.html',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-site',
-            'Priority': 'u=1, i'
-        }
-        self.session.headers.update(headers)
 
         candidates = [
             f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate={dt_ymd_prev}&strScrip=&strSearch=D&strToDate={dt_ymd_today}&strType=C",
@@ -167,13 +152,8 @@ class MasterAutomationEngine:
 
         for idx, url in enumerate(candidates, 1):
             try:
-                res = self.session.get(url, timeout=15)
-                logging.info(f"[Endpoint #{idx}] Status Code: {res.status_code} | URL: {url}")
-                
-                # Log raw snippet if payload is non-JSON or HTML block
-                raw_preview = res.text[:250].replace('\n', ' ').replace('\r', '')
-                logging.info(f"[Endpoint #{idx}] Raw Response Snippet: {raw_preview}")
-
+                res = self.session.get(url, timeout=12)
+                logging.info(f"Checking BSE Endpoint #{idx} | Status: {res.status_code}")
                 if res.status_code == 200:
                     data = res.json()
                     items = []
@@ -183,13 +163,13 @@ class MasterAutomationEngine:
                         items = data
 
                     if items:
-                        logging.info(f"Successfully retrieved {len(items)} BSE filings from Endpoint #{idx}.")
+                        logging.info(f"Successfully fetched {len(items)} live announcements across all stocks.")
                         return items
             except Exception as e:
-                logging.error(f"[Endpoint #{idx}] Request failed: {e}")
+                logging.error(f"Error querying BSE candidate #{idx}: {e}")
                 continue
 
-        logging.warning("All BSE API endpoint strategies returned 0 announcements.")
+        logging.warning("All market-wide BSE endpoints returned 0 results.")
         return []
 
     def fetch_screener_concalls(self) -> list:
@@ -325,10 +305,8 @@ class MasterAutomationEngine:
             self.seen_ids.add(item['unique_key'])
             self.save_seen_ids()
 
-        # 2. Process ALL BSE Corporate Announcements Across the Exchange
+        # 2. Process ALL BSE Corporate Announcements
         announcements = self.fetch_all_bse_announcements()
-        logging.info(f"Fetched {len(announcements)} live announcements from BSE.")
-
         for ann in announcements:
             scrip_cd = str(ann.get('SCRIP_CD', '')).strip()
             company_name = str(ann.get('SLONGNAME', ann.get('COMPANY_NAME', 'Unknown'))).strip()
