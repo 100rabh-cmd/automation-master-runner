@@ -34,39 +34,66 @@ TELEGRAM_BOT_TOKEN_CC = os.getenv("TELEGRAM_BOT_TOKEN_CC")
 TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
 TARGET_FETCH_LIST = [
-    {"strCat": "Company Update", "subcategory": "Award of Order / Receipt of Order"},
-    {"strCat": "Company Update", "subcategory": "Analyst / Investor Meet"},
-    {"strCat": "Company Update", "subcategory": "Earnings Call Transcript"},
-    {"strCat": "Result", "subcategory": "Financial Results"},
-    {"strCat": "Corp. Action", "subcategory": "-1"},
-    {"strCat": "Company Update", "subcategory": "Capacity addition (Sub-para 3-Para B)"},
-    {"strCat": "Company Update", "subcategory": "Acquisition"},
-    {"strCat": "Company Update", "subcategory": "Press Release / Media Release"},
-    {"strCat": "Company Update", "subcategory": "Change in Management"},
-    {"strCat": "Company Update", "subcategory": "Credit Rating"}
-]
-
-EXPANSION_ORDERS_KEYWORDS = [
-    "expansion", "capacity", "commercial production", "commissioning",
-    "new plant", "new facility", "setting up", "capacity addition", 
-    "greenfield", "brownfield", "award of order", "receipt of order", 
-    "incorporation of subsidiary", "mou", "memorandum of understanding", 
-    "acquisition", "acquire", "joint venture", "jv", "cod", "commercial operation"
-]
-
-RESULT_KEYWORDS = [
-    "financial results", "financial result", "board meeting outcome - financial results",
-    "audited result", "unaudited result", "quarterly result", "audited financial", "un-audited"
-]
-
-CONCALL_KEYWORDS = [
-    "analyst / investor meet", "earnings call transcript", 
-    "investor presentation", "analyst presentation", "audio recording", "concall"
-]
-
-ACTION_KEYWORDS = [
-    "bonus issue", "stock split", "rights issue", "buyback", 
-    "fund raising", "issue of securities", "preferential allotment"
+    {
+        "strCat": "Company Update",
+        "subcategory": "Award of Order / Receipt of Order",
+        "sheet_tab": "Award_of_Order_Receipt_of_Order",
+        "route_group": "CE",
+    },
+    {
+        "strCat": "Company Update",
+        "subcategory": "Analyst / Investor Meet",
+        "sheet_tab": "Concalls",
+        "route_group": "CC",
+    },
+    {
+        "strCat": "Company Update",
+        "subcategory": "Earnings Call Transcript",
+        "sheet_tab": "Concalls",
+        "route_group": "CC",
+    },
+    {
+        "strCat": "Result",
+        "subcategory": "Financial Results",
+        "sheet_tab": "Results",
+        "route_group": "RES",
+    },
+    {
+        "strCat": "Corp. Action",
+        "subcategory": "-1",
+        "sheet_tab": "Actions",
+        "route_group": "ANN",
+    },
+    {
+        "strCat": "Company Update",
+        "subcategory": "Capacity addition (Sub-para 3-Para B)",
+        "sheet_tab": "Expansion",
+        "route_group": "CE",
+    },
+    {
+        "strCat": "Company Update",
+        "subcategory": "Acquisition",
+        "sheet_tab": "Expansion",
+        "route_group": "CE",
+    },
+    {
+        "strCat": "Company Update",
+        "subcategory": "Press Release / Media Release",
+        "sheet_tab": "Log",
+        "route_group": "ANN",
+    },
+    {
+        "strCat": "Company Update",
+        "subcategory": "Change in Management",
+        "sheet_tab": "Log",
+        "route_group": "ANN",
+    },
+    {
+        "strCat": "Company Update",
+        "subcategory": "Credit Rating",
+        "sheet_tab": "Log",
+        "route_group": "ANN",
+    },
 ]
 
 NOISE_KEYWORDS = [
@@ -105,7 +132,8 @@ class MasterAutomationEngine:
             except Exception:
                 pass
 
-        for tab_name in ["Expansion", "Results", "Concalls", "Actions", "Log"]:
+        tabs = ["Award_of_Order_Receipt_of_Order", "Expansion", "Results", "Concalls", "Actions", "Log"]
+        for tab_name in tabs:
             try:
                 ws = self.sh.worksheet(tab_name)
                 rows = ws.get_all_values()
@@ -126,7 +154,6 @@ class MasterAutomationEngine:
             logging.error(f"Error saving state: {e}")
 
     def fetch_bse_subcategories_by_curl(self, str_cat: str, subcategory: str) -> list:
-        # Weekend ya kisi bhi din pichle 3 din ka data pull karne ke liye range set hai
         to_date = datetime.now().strftime("%Y%m%d")
         from_date = (datetime.now() - timedelta(days=3)).strftime("%Y%m%d")
         
@@ -176,7 +203,7 @@ class MasterAutomationEngine:
                 if not comp:
                     continue
                 c_name = comp.get_text(strip=True)
-                href = comp.get('href', '')
+                href = card.get('href', '')
                 parts = [p for p in href.split('/') if p]
                 raw_ticker = parts[parts.index('company') + 1] if 'company' in parts and parts.index('company') + 1 < len(parts) else ""
                 
@@ -202,22 +229,6 @@ class MasterAutomationEngine:
         except Exception as e:
             logging.error(f"Error scraping Screener concalls: {e}")
             return []
-
-    def classify_announcement(self, text: str) -> tuple[str | None, str | None]:
-        t = text.lower()
-        if any(k in t for k in NOISE_KEYWORDS):
-            return None, None
-        
-        if any(k in t for k in EXPANSION_ORDERS_KEYWORDS):
-            return "Expansion", "CE"
-        if any(k in t for k in RESULT_KEYWORDS):
-            return "Results", "RES"
-        if any(k in t for k in CONCALL_KEYWORDS):
-            return "Concalls", "CC"
-        if any(k in t for k in ACTION_KEYWORDS):
-            return "Actions", "ANN"
-        
-        return "Log", "ANN"
 
     def send_telegram_alert(self, company: str, ticker: str, headline: str, pdf_url: str, route_group: str):
         bot_tokens = {
@@ -260,42 +271,63 @@ class MasterAutomationEngine:
         except Exception as e:
             logging.error(f"Telegram alert error: {e}")
 
-    def write_to_sheet(self, tab_name: str, company: str, headline: str, pdf_url: str, ticker: str):
+    def write_to_sheet(self, tab_name: str, rows_data: list):
+        if not rows_data:
+            return
         try:
             ws = self.sh.worksheet(tab_name)
         except WorksheetNotFound:
             ws = self.sh.add_worksheet(title=tab_name, rows="1000", cols="15")
             ws.append_row(["Date", "Company", "Headline", "PDF Link", "Status", "Ticker", "Price", "Market Cap", "PE", "High 52", "Low 52"])
 
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        price_formula = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "price"), "N/A")'
-        mcap_formula  = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "marketcap")/10000000, "N/A")'
-        pe_formula    = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "pe"), "N/A")'
-        high_formula  = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "high52"), "N/A")'
-        low_formula   = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "low52"), "N/A")'
-
-        ws.insert_row([
-            current_time, company, headline, pdf_url, "READY",
-            ticker, price_formula, mcap_formula, pe_formula, high_formula, low_formula
-        ], index=2, value_input_option="USER_ENTERED")
+        for row in rows_data:
+            try:
+                ws.insert_row(row, index=2, value_input_option="USER_ENTERED")
+                time.sleep(1.5)
+            except Exception as e:
+                logging.error(f"Sheet write error: {e}")
+                time.sleep(5)
 
     def run(self):
         logging.info("Starting master scanning engine...")
 
         screener_items = self.fetch_screener_concalls()
         logging.info(f"Fetched {len(screener_items)} Screener items.")
+        
+        tab_buffers = {
+            "Award_of_Order_Receipt_of_Order": [],
+            "Expansion": [],
+            "Results": [],
+            "Concalls": [],
+            "Actions": [],
+            "Log": []
+        }
+
         for item in screener_items:
             if item['unique_key'] in self.seen_ids:
                 continue
-            self.write_to_sheet(item['target_tab'], item['company'], item['headline'], item['pdf_url'], item['ticker'])
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            row = [
+                current_time, item['company'], item['headline'], item['pdf_url'], "READY",
+                item['ticker'],
+                '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "price"), "N/A")',
+                '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "marketcap")/10000000, "N/A")',
+                '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "pe"), "N/A")',
+                '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "high52"), "N/A")',
+                '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "low52"), "N/A")'
+            ]
+            target_t = item['target_tab']
+            if target_t in tab_buffers:
+                tab_buffers[target_t].append(row)
             self.send_telegram_alert(item['company'], item['ticker'], item['headline'], item['pdf_url'], item['route_group'])
             self.seen_ids.add(item['unique_key'])
-            self.save_seen_ids()
 
         for target in TARGET_FETCH_LIST:
             str_cat = target["strCat"]
             subcat = target["subcategory"]
+            target_tab = target["sheet_tab"]
+            route_group = target["route_group"]
+
             logging.info(f"Scanning BSE Category: '{str_cat}' -> Subcategory: '{subcat}'...")
             
             announcements = self.fetch_bse_subcategories_by_curl(str_cat, subcat)
@@ -310,8 +342,13 @@ class MasterAutomationEngine:
                 news_sub = str(ann.get('NEWSSUB', ann.get('CATEGORYNAME', ''))).strip()
                 combined = f"{news_sub} {headline}"
 
-                target_tab, route_group = self.classify_announcement(combined)
-                if not target_tab:
+                # Noise filter check
+                t_lower = combined.lower()
+                if any(k in t_lower for k in NOISE_KEYWORDS):
+                    continue
+
+                # Specific exclusion for Award of Order / Receipt of Order containing GST
+                if target_tab == "Award_of_Order_Receipt_of_Order" and "gst" in t_lower:
                     continue
 
                 attachment = ann.get('ATTACHMENTNAME', ann.get('AttachmentName', ann.get('ATTACHMENT_NAME', '')))
@@ -321,11 +358,33 @@ class MasterAutomationEngine:
                 if unique_key in self.seen_ids:
                     continue
 
-                self.write_to_sheet(target_tab, company_name, headline, pdf_url, ticker_fmt)
-                self.send_telegram_alert(company_name, ticker_fmt, headline, pdf_url, route_group)
+                current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                row = [
+                    current_time, company_name, headline, pdf_url, "READY",
+                    ticker_fmt,
+                    '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "price"), "N/A")',
+                    '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "marketcap")/10000000, "N/A")',
+                    '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "pe"), "N/A")',
+                    '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "high52"), "N/A")',
+                    '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "low52"), "N/A")'
+                ]
+                
+                if target_tab not in tab_buffers:
+                    tab_buffers[target_tab] = []
+                tab_buffers[target_tab].append(row)
 
+                self.send_telegram_alert(company_name, ticker_fmt, headline, pdf_url, route_group)
                 self.seen_ids.add(unique_key)
-                self.save_seen_ids()
+
+            time.sleep(2)
+
+        for tab_name, rows in tab_buffers.items():
+            if rows:
+                logging.info(f"Writing {len(rows)} records to tab '{tab_name}'...")
+                self.write_to_sheet(tab_name, rows)
+
+        self.save_seen_ids()
+        logging.info("Master scanning engine completed successfully.")
 
 if __name__ == "__main__":
     engine = MasterAutomationEngine()
