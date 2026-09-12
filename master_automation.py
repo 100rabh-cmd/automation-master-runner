@@ -136,15 +136,28 @@ class MasterAutomationEngine:
             logging.error(f"Error saving state: {e}")
 
     def fetch_all_bse_announcements(self) -> list:
-        """Fetches live market-wide announcements with fallback endpoint strategies."""
+        """Fetches market-wide BSE announcements with raw diagnostic logging and WAF fallback."""
         now = datetime.now()
         three_days_ago = now - timedelta(days=3)
         
         dt_ymd_today = now.strftime("%Y%m%d")
         dt_ymd_prev = three_days_ago.strftime("%Y%m%d")
-        
         dt_slash_today = now.strftime("%d/%m/%Y")
         dt_slash_prev = three_days_ago.strftime("%d/%m/%Y")
+
+        # Enhanced Browser Headers to pass Akamai/Cloudflare checks
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Origin': 'https://www.bseindia.com',
+            'Referer': 'https://www.bseindia.com/corporates/ann.html',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-site',
+            'Priority': 'u=1, i'
+        }
+        self.session.headers.update(headers)
 
         candidates = [
             f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate={dt_ymd_prev}&strScrip=&strSearch=D&strToDate={dt_ymd_today}&strType=C",
@@ -152,9 +165,15 @@ class MasterAutomationEngine:
             f"https://api.bseindia.com/BseIndiaAPI/api/AnnouncementsList/w?pageno=1&strCat=-1&strPrevDate={dt_ymd_prev}&strScrip=&strSearch=D&strToDate={dt_ymd_today}&strType=C"
         ]
 
-        for url in candidates:
+        for idx, url in enumerate(candidates, 1):
             try:
-                res = self.session.get(url, timeout=12)
+                res = self.session.get(url, timeout=15)
+                logging.info(f"[Endpoint #{idx}] Status Code: {res.status_code} | URL: {url}")
+                
+                # Log raw snippet if payload is non-JSON or HTML block
+                raw_preview = res.text[:250].replace('\n', ' ').replace('\r', '')
+                logging.info(f"[Endpoint #{idx}] Raw Response Snippet: {raw_preview}")
+
                 if res.status_code == 200:
                     data = res.json()
                     items = []
@@ -164,10 +183,10 @@ class MasterAutomationEngine:
                         items = data
 
                     if items:
-                        logging.info(f"Successfully retrieved {len(items)} BSE filings.")
+                        logging.info(f"Successfully retrieved {len(items)} BSE filings from Endpoint #{idx}.")
                         return items
             except Exception as e:
-                logging.error(f"Error querying BSE candidate endpoint: {e}")
+                logging.error(f"[Endpoint #{idx}] Request failed: {e}")
                 continue
 
         logging.warning("All BSE API endpoint strategies returned 0 announcements.")
