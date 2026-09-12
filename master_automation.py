@@ -6,7 +6,7 @@ import logging
 import warnings
 import html
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -41,6 +41,9 @@ TARGET_FETCH_LIST = [
     {"strCat": "Corp. Action", "subcategory": "-1"},
     {"strCat": "Company Update", "subcategory": "Capacity addition (Sub-para 3-Para B)"},
     {"strCat": "Company Update", "subcategory": "Acquisition"},
+    {"strCat": "Company Update", "subcategory": "Press Release / Media Release"},
+    {"strCat": "Company Update", "subcategory": "Change in Management"},
+    {"strCat": "Company Update", "subcategory": "Credit Rating"}
 ]
 
 EXPANSION_ORDERS_KEYWORDS = [
@@ -48,7 +51,7 @@ EXPANSION_ORDERS_KEYWORDS = [
     "new plant", "new facility", "setting up", "capacity addition", 
     "greenfield", "brownfield", "award of order", "receipt of order", 
     "incorporation of subsidiary", "mou", "memorandum of understanding", 
-    "acquisition", "acquire", "joint venture", "jv"
+    "acquisition", "acquire", "joint venture", "jv", "cod", "commercial operation"
 ]
 
 RESULT_KEYWORDS = [
@@ -70,7 +73,8 @@ NOISE_KEYWORDS = [
     "trading window", "share certificate", "loss of share", "duplicate share",
     "compliance certificate", "newspaper publication", "clarification", 
     "voting results", "scrutinizer report", "loss of certificate",
-    "regulation 29", "regulation 10", "reg 29", "reg 10", "reg 29(2)", "reg 10(6)", "sast"
+    "regulation 29", "regulation 10", "reg 29", "reg 10", "reg 29(2)", "reg 10(6)", "sast",
+    "postal ballot", "annual report", "dividend"
 ]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -122,7 +126,11 @@ class MasterAutomationEngine:
             logging.error(f"Error saving state: {e}")
 
     def fetch_bse_subcategories_by_curl(self, str_cat: str, subcategory: str) -> list:
-        url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat={quote(str_cat)}&strPrevDate=&strScrip=&strSearch=C&strToDate=&strType=C&subcategory={quote(subcategory)}"
+        # Weekend ya kisi bhi din pichle 3 din ka data pull karne ke liye range set hai
+        to_date = datetime.now().strftime("%Y%m%d")
+        from_date = (datetime.now() - timedelta(days=3)).strftime("%Y%m%d")
+        
+        url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat={quote(str_cat)}&strPrevDate={from_date}&strScrip=&strSearch=C&strToDate={to_date}&strType=C&subcategory={quote(subcategory)}"
         
         cmd = [
             "curl", "-s", "-L",
