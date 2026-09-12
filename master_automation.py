@@ -16,38 +16,31 @@ from oauth2client.service_account import ServiceAccountCredentials
 warnings.filterwarnings("ignore")
 load_dotenv()
 
-# ==============================================================================
-# ------------------------- CONFIGURATION HEADER -------------------------------
-# ==============================================================================
-
 CREDENTIALS_FILE = "credentials.json"
 GOOGLE_SHEET_NAME = "StockPulse Tracker"
 STATE_FILE = "last_seen_master.json"
 
 SCREENER_CONCALL_URL = "https://www.screener.in/announcements/user-filters/223297/"
 
-# Telegram Environment Variables
 TELEGRAM_BOT_TOKEN_ANN = os.getenv("TELEGRAM_BOT_TOKEN_ANN")
 TELEGRAM_CHAT_ID_ANN = os.getenv("TELEGRAM_CHAT_ID_ANN")
-
 TELEGRAM_BOT_TOKEN_RES = os.getenv("TELEGRAM_BOT_TOKEN_RES")
 TELEGRAM_CHAT_ID_RES = os.getenv("TELEGRAM_CHAT_ID_RES")
-
 TELEGRAM_BOT_TOKEN_CE = os.getenv("TELEGRAM_BOT_TOKEN_CE")
 TELEGRAM_CHAT_ID_CE = os.getenv("TELEGRAM_CHAT_ID_CE")
-
 TELEGRAM_BOT_TOKEN_CC = os.getenv("TELEGRAM_BOT_TOKEN_CC")
 TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC")
 
 BSE_PROXY_URL = os.getenv("BSE_PROXY_URL") or os.getenv("HTTPS_PROXY")
 
-# Categorization Keywords
+# Keywords me MOU, Acquisition, Joint Venture add kar diya gaya hai
 EXPANSION_KEYWORDS = [
     "expansion", "capacity", "commercial production", "commissioning",
     "new plant", "new facility", "setting up", "capacity addition", 
     "greenfield", "brownfield", "award_of_order_receipt_of_order", 
     "award of order", "receipt of order", "incorporation of subsidiary",
-    "bonus / stock split / rights issue", "buyback", "fund raising", "issue of securities"
+    "bonus / stock split / rights issue", "buyback", "fund raising", "issue of securities",
+    "mou", "memorandum of understanding", "acquisition", "acquire", "joint venture", "jv"
 ]
 
 RESULT_KEYWORDS = [
@@ -60,19 +53,15 @@ CONCALL_KEYWORDS = [
     "investor presentation", "analyst presentation", "audio recording", "concall"
 ]
 
+# Filtering non-essential compliance items
 NOISE_KEYWORDS = [
     "trading window", "share certificate", "loss of share", "duplicate share",
     "compliance certificate", "newspaper publication", "clarification", 
-    "voting results", "scrutinizer report", "loss of certificate", 
-    "substantial acquisition", "takeovers", "regulation 29", "regulation 10", 
-    "reg 29", "reg 10", "reg 29(2)", "reg 10(6)", "sast"
+    "voting results", "scrutinizer report", "loss of certificate",
+    "regulation 29", "regulation 10", "reg 29", "reg 10", "reg 29(2)", "reg 10(6)", "sast"
 ]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# ==============================================================================
-# ------------------------- MASTER AUTOMATION ENGINE ---------------------------
-# ==============================================================================
 
 class MasterAutomationEngine:
     def __init__(self):
@@ -135,19 +124,17 @@ class MasterAutomationEngine:
             logging.error(f"Error saving state: {e}")
 
     def fetch_all_bse_announcements(self) -> list:
-        """Har stock ke liye market-wide announcements fetch karta hai."""
+        """Correct endpoint for entire market filings."""
         now = datetime.now()
         three_days_ago = now - timedelta(days=3)
         
-        dt_ymd_today = now.strftime("%Y%m%d")
-        dt_ymd_prev = three_days_ago.strftime("%Y%m%d")
         dt_slash_today = now.strftime("%d/%m/%Y")
         dt_slash_prev = three_days_ago.strftime("%d/%m/%Y")
 
+        # Working market-wide endpoints
         candidates = [
-            f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate={dt_ymd_prev}&strScrip=&strSearch=D&strToDate={dt_ymd_today}&strType=C",
-            f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate={dt_slash_prev}&strScrip=&strSearch=D&strToDate={dt_slash_today}&strType=C",
-            f"https://api.bseindia.com/BseIndiaAPI/api/AnnouncementsList/w?pageno=1&strCat=-1&strPrevDate={dt_ymd_prev}&strScrip=&strSearch=D&strToDate={dt_ymd_today}&strType=C"
+            f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubmissionData/w?pageno=1&strCat=-1&strPrevDate={dt_slash_prev}&strScrip=&strSearch=D&strToDate={dt_slash_today}&strType=C",
+            f"https://api.bseindia.com/BseIndiaAPI/api/AnnGetData/w?strCat=-1&strPrevDate={dt_slash_prev}&strScrip=&strSearch=D&strToDate={dt_slash_today}&strType=C"
         ]
 
         for idx, url in enumerate(candidates, 1):
@@ -155,7 +142,12 @@ class MasterAutomationEngine:
                 res = self.session.get(url, timeout=12)
                 logging.info(f"Checking BSE Endpoint #{idx} | Status: {res.status_code}")
                 if res.status_code == 200:
-                    data = res.json()
+                    try:
+                        data = res.json()
+                    except json.JSONDecodeError:
+                        logging.warning(f"Endpoint #{idx} returned non-JSON response.")
+                        continue
+
                     items = []
                     if isinstance(data, dict):
                         items = data.get("Table") or data.get("Table1") or data.get("Table2") or []
@@ -163,7 +155,7 @@ class MasterAutomationEngine:
                         items = data
 
                     if items:
-                        logging.info(f"Successfully fetched {len(items)} live announcements across all stocks.")
+                        logging.info(f"Successfully fetched {len(items)} announcements.")
                         return items
             except Exception as e:
                 logging.error(f"Error querying BSE candidate #{idx}: {e}")
@@ -251,7 +243,7 @@ class MasterAutomationEngine:
             return
 
         tag_labels = {
-            "CE": "🏭 Capacity Expansion", 
+            "CE": "🏭 Capacity Expansion / Acquisition", 
             "RES": "📊 Financial Results", 
             "CC": "🎙️ Concall / Presentation", 
             "ANN": "⚡ Corporate Update"
@@ -308,11 +300,11 @@ class MasterAutomationEngine:
         # 2. Process ALL BSE Corporate Announcements
         announcements = self.fetch_all_bse_announcements()
         for ann in announcements:
-            scrip_cd = str(ann.get('SCRIP_CD', '')).strip()
-            company_name = str(ann.get('SLONGNAME', ann.get('COMPANY_NAME', 'Unknown'))).strip()
+            scrip_cd = str(ann.get('SCRIP_CD', ann.get('Scrip_CD', ''))).strip()
+            company_name = str(ann.get('SLONGNAME', ann.get('COMPANY_NAME', ann.get('sname', 'Unknown')))).strip()
             ticker_fmt = f"BOM:{scrip_cd}" if scrip_cd else ""
 
-            headline = str(ann.get('HEADLINE', '')).strip()
+            headline = str(ann.get('HEADLINE', ann.get('NEWSSUB', ''))).strip()
             news_sub = str(ann.get('NEWSSUB', ann.get('CATEGORYNAME', ''))).strip()
             combined = f"{news_sub} {headline}"
 
@@ -320,7 +312,7 @@ class MasterAutomationEngine:
             if not target_tab:
                 continue
 
-            attachment = ann.get('ATTACHMENTNAME')
+            attachment = ann.get('ATTACHMENTNAME', ann.get('AttachmentName', ''))
             pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}" if attachment else ""
             unique_key = pdf_url if pdf_url else f"{scrip_cd}_{headline}"
 
