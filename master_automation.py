@@ -160,10 +160,13 @@ class MasterAutomationEngine:
         except Exception as e:
             logging.error(f"Error saving state: {e}")
 
-    def fetch_bse_subcategories_by_curl(self, str_cat: str, subcategory: str) -> list:
-        to_date = datetime.now().strftime("%Y%m%d")
-        from_date = (datetime.now() - timedelta(days=3)).strftime("%Y%m%d")
-        
+    def fetch_bse_subcategories_by_curl(
+        self, str_cat: str, subcategory: str
+    ) -> list:
+        # Change format from %Y%m%d to %d/%m/%Y
+        to_date = datetime.now().strftime("%d/%m/%Y")
+        from_date = (datetime.now() - timedelta(days=3)).strftime("%d/%m/%Y")
+
         url = f"https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat={quote(str_cat)}&strPrevDate={from_date}&strScrip=&strSearch=C&strToDate={to_date}&strType=C&subcategory={quote(subcategory)}"
         
         cmd = [
