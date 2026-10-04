@@ -92,15 +92,54 @@ def normalize_details(text):
     cleaned = re.sub(r'^(Today|Yesterday|[A-Za-z]{3}\s+\d{1,2},\s+\d{4}|\d+\s+[A-Za-z]+\s+ago)\s*', '', text, flags=re.IGNORECASE)
     return re.sub(r'\s+', ' ', cleaned).strip()
 
+def send_session_error_alert():
+    """Sends exactly 1 Telegram alert when the Screener Session ID expires."""
+    if not TELEGRAM_BOT_TOKEN_CC or not TELEGRAM_CHAT_ID_CC:
+        print("Telegram skipped: Credentials not configured.")
+        return
+
+    message = (
+        "⚠️ <b>Screener Session ID Expired!</b>\n\n"
+        "The Screener.in session cookie has expired or is invalid. "
+        "Concall updates cannot be scraped.\n\n"
+        "🛠️ <b>Action Required:</b> Update `sessionid` in your `.env` or GitHub Secrets."
+    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_CC}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID_CC,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+        print("Session expiry notification sent to Telegram.")
+    except Exception as e:
+        print(f"Failed to send session alert: {e}")
+
 def fetch_concall_announcements():
     print(f"[{datetime.now()}] Fetching concall updates from Screener...")
     try:
-        response = requests.get(SCREENER_CONCALL_URL, headers=HEADERS, timeout=15)
+        # allow_redirects=False prevents automatic redirect to /login/
+        response = requests.get(SCREENER_CONCALL_URL, headers=HEADERS, timeout=15, allow_redirects=False)
+        
+        # Check for Session Expiry / Authorization failures
+        if response.status_code in [301, 302, 401, 403] or "login" in response.url.lower():
+            print("❌ Screener Session ID expired or invalid.")
+            send_session_error_alert()
+            return []
+
         if response.status_code != 200:
             print(f"Failed to fetch page. Status code: {response.status_code}")
             return []
 
         soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Additional check: If logged out, Screener serves a login page instead of cards
+        if soup.find('form', action=lambda x: x and 'login' in x):
+            print("❌ Screener Session ID invalid (login form detected).")
+            send_session_error_alert()
+            return []
+
         updates = []
         seen_in_page = set()
 
@@ -131,7 +170,6 @@ def fetch_concall_announcements():
                 h = link_elem['href']
                 pdf_link = h if h.startswith('http') else "https://www.screener.in" + h
 
-            # Primary Deduplication Key: Unique PDF Link
             if pdf_link and "screener.in" not in pdf_link:
                 unique_key = pdf_link.strip()
             else:
@@ -154,6 +192,7 @@ def fetch_concall_announcements():
     except Exception as e:
         print(f"Error fetching concalls: {e}")
         return []
+
 
 def run_automation():
     seen_ids = load_last_seen()
