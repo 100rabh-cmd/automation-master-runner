@@ -1,23 +1,22 @@
-name: Master Automation Runner
+name: Master Automation Workflow
 
 on:
   schedule:
-    # Runs at minute 0 of every hour (UTC)
     - cron: '0 * * * *'
-  workflow_dispatch: # Allows manual trigger button in GitHub UI
+  workflow_dispatch:
 
 permissions:
-  contents: write # Allows saving updated last_seen JSON state files back to the repo
+  contents: write
 
 jobs:
-  run-master:
+  run-pipeline:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Check out repository
+    - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up Python
+    - name: Set up Python 3.11
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
@@ -27,14 +26,14 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    # Dynamically generates credentials.json for Google Sheets integration
-    - name: Create credentials.json
+    - name: Setup Google Credentials
       env:
         CREDENTIALS_JSON: ${{ secrets.CREDENTIALS_JSON }}
       run: |
         python -c "import os; open('credentials.json', 'w').write(os.environ['CREDENTIALS_JSON'])"
 
-    - name: Execute Master Automation Engine
+    # Step 1: Run BSE Master Automation Engine directly
+    - name: Execute BSE Master Automation Engine
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -47,10 +46,25 @@ jobs:
         TELEGRAM_BOT_TOKEN_CC: ${{ secrets.TELEGRAM_BOT_TOKEN_CC }}
         TELEGRAM_CHAT_ID_CC: ${{ secrets.TELEGRAM_CHAT_ID_CC }}
       run: |
+        python master_automation.py
+
+    # Step 2: Run Master Runner (Calls expansion, concall, results & stock scanner in sequence)
+    - name: Execute Master Runner (Watcher Sequence)
+      env:
+        TELEGRAM_BOT_TOKEN_ANN: ${{ secrets.TELEGRAM_BOT_TOKEN_ANN }}
+        TELEGRAM_CHAT_ID_ANN: ${{ secrets.TELEGRAM_CHAT_ID_ANN }}
+        TELEGRAM_BOT_TOKEN_RES: ${{ secrets.TELEGRAM_BOT_TOKEN_RES }}
+        TELEGRAM_CHAT_ID_RES: ${{ secrets.TELEGRAM_CHAT_ID_RES }}
+        TELEGRAM_BOT_TOKEN_CE: ${{ secrets.TELEGRAM_BOT_TOKEN_CE }}
+        TELEGRAM_CHAT_ID_CE: ${{ secrets.TELEGRAM_CHAT_ID_CE }}
+        TELEGRAM_BOT_TOKEN_CC: ${{ secrets.TELEGRAM_BOT_TOKEN_CC }}
+        TELEGRAM_CHAT_ID_CC: ${{ secrets.TELEGRAM_CHAT_ID_CC }}
+        SCREENER_SESSION_ID: ${{ secrets.SCREENER_SESSION_ID }}
+        SCREENER_CSRF_TOKEN: ${{ secrets.SCREENER_CSRF_TOKEN }}
+      run: |
         python master_runner.py
 
-    # Persists updated state files back to GitHub to prevent duplicate alerts
-    - name: Commit updated state JSON files
+    - name: Commit updated state files
       uses: stefanzweifel/git-auto-commit-action@v5
       with:
         commit_message: "auto: update last_seen state files [skip ci]"
