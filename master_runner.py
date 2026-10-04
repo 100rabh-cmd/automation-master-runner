@@ -8,6 +8,7 @@ SCRIPT_SCHEDULE = [
     {"script": "expansion_watcher.py", "pause_after": 120},  # 2 min pause
     {"script": "concall_watcher.py",   "pause_after": 180},  # 3 min pause
     {"script": "results_watcher.py",   "pause_after": 180},  # 3 min pause
+    {"script": "order_watcher.py",     "pause_after": 180},  # 3 min pause
     {"script": "stock_scanner.py",     "pause_after": 0}     # Final script
 ]
 
