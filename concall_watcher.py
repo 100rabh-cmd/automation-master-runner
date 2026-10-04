@@ -25,7 +25,7 @@ TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC") or os.getenv("TELEGRAM_CH
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Cookie": "csrftoken=PNaWmraZrRgc9NfKH57aPQhp3ngDTVt9; sessionid=k8wmkhm9isrfjj64sivgr4gl11k5b4s5"
+    "Cookie": "csrftoken=PNaWmraZrRgc9NfKH57aPQhp3ngDTVt9; sessionid=zadm0qaxyj3y7zkzoke8r89d4e36m95t"
 }
 
 def init_google_sheet(tab_name):
