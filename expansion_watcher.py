@@ -150,11 +150,11 @@ def run_expansion_tracker():
 
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            price_formula = '=IFERROR(GOOGLEFINANCE(F2, "price"), "N/A")'
-            mcap_formula  = '=IFERROR(GOOGLEFINANCE(F2, "marketcap")/10000000, "N/A")'
-            pe_formula    = '=IFERROR(GOOGLEFINANCE(F2, "pe"), "N/A")'
-            high_formula  = '=IFERROR(GOOGLEFINANCE(F2, "high52"), "N/A")'
-            low_formula   = '=IFERROR(GOOGLEFINANCE(F2, "low52"), "N/A")'
+            price_formula = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "price"), "N/A")'
+            mcap_formula  = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "marketcap")/10000000, "N/A")'
+            pe_formula    = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "pe"), "N/A")'
+            high_formula  = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "high52"), "N/A")'
+            low_formula   = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "low52"), "N/A")'
 
             expansion_sheet.insert_row([
                 current_time,
