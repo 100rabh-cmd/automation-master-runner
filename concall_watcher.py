@@ -1,14 +1,15 @@
 import os
-from dotenv import load_dotenv
+import sys
 import json
 import re
+import time
+import html
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 import gspread
-import time
-import html
 from oauth2client.service_account import ServiceAccountCredentials
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -19,14 +20,34 @@ CREDENTIALS_FILE = "credentials.json"
 SHEET_NAME = "StockPulse Tracker"
 CONCALL_TAB = "Concalls"
 
-# Environment variables
 TELEGRAM_BOT_TOKEN_CC = os.getenv("TELEGRAM_BOT_TOKEN_CC") or os.getenv("TELEGRAM_BOT_TOKEN_ANN") or os.getenv("TELEGRAM_BOT_TOKEN_CE")
 TELEGRAM_CHAT_ID_CC = os.getenv("TELEGRAM_CHAT_ID_CC") or os.getenv("TELEGRAM_CHAT_ID_ANN") or os.getenv("TELEGRAM_CHAT_ID_CE")
 
+SCREENER_SESSION_ID = os.getenv("SCREENER_SESSION_ID", "k8wmkhm9isrfjj64sivgr4gl11k5b4s5")
+SCREENER_CSRF_TOKEN = os.getenv("SCREENER_CSRF_TOKEN", "PNaWmraZrRgc9NfKH57aPQhp3ngDTVt9")
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Cookie": "csrftoken=PNaWmraZrRgc9NfKH57aPQhp3ngDTVt9; sessionid=zadm0qaxyj3y7zkzoke8r89d4e36m95t"
+    "Cookie": f"csrftoken={SCREENER_CSRF_TOKEN}; sessionid={SCREENER_SESSION_ID}"
 }
+
+def send_session_alert(reason: str):
+    """Notifies Telegram if the Screener session token has expired or is invalid."""
+    if not TELEGRAM_BOT_TOKEN_CC or not TELEGRAM_CHAT_ID_CC:
+        return
+
+    message = (
+        f"🚨 <b>SCREENER SESSION EXPIRED / FAILED</b> 🚨\n\n"
+        f"<b>Reason:</b> {reason}\n\n"
+        f"🔑 <b>Action Required:</b> Log in to Screener.in, retrieve a new <code>sessionid</code> cookie, "
+        f"and update your GitHub repository secret <code>SCREENER_SESSION_ID</code>."
+    )
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_CC}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID_CC, "text": message, "parse_mode": "HTML"}
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Failed to send session alert: {e}")
 
 def init_google_sheet(tab_name):
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -57,89 +78,48 @@ def format_ticker(symbol_or_code):
 
 def send_telegram_alert(company, ticker, title, pdf_link):
     if not TELEGRAM_BOT_TOKEN_CC:
-        print("Telegram skipped: Bot token not configured.")
         return
-    
-    ticker_display = f" (<code>{html.escape(ticker)}</code>)" if ticker else ""
-    safe_company = html.escape(company)
-    safe_title = html.escape(title)
 
+    ticker_display = f" (<code>{html.escape(ticker)}</code>)" if ticker else ""
     message = (
         f"🎙️ <b>New Concall / Investor Presentation Alert!</b>\n\n"
-        f"📌 <b>Company:</b> {safe_company}{ticker_display}\n\n"
-        f"📝 <b>Details:</b> {safe_title}\n\n"
+        f"📌 <b>Company:</b> {html.escape(company)}{ticker_display}\n\n"
+        f"📝 <b>Details:</b> {html.escape(title)}\n\n"
         f"📄 <b>PDF Document:</b> {pdf_link}\n\n"
         f"📲 Follow: @financewith100rabh"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_CC}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID_CC,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
+    payload = {"chat_id": TELEGRAM_CHAT_ID_CC, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            print(f"Telegram alert sent successfully for {company}.")
-        else:
-            print(f"Failed to send Telegram alert: {response.text}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"Telegram alert error: {e}")
 
 def normalize_details(text):
-    """Removes dynamic relative date prefixes."""
     cleaned = re.sub(r'^(Today|Yesterday|[A-Za-z]{3}\s+\d{1,2},\s+\d{4}|\d+\s+[A-Za-z]+\s+ago)\s*', '', text, flags=re.IGNORECASE)
     return re.sub(r'\s+', ' ', cleaned).strip()
 
-def send_session_error_alert():
-    """Sends exactly 1 Telegram alert when the Screener Session ID expires."""
-    if not TELEGRAM_BOT_TOKEN_CC or not TELEGRAM_CHAT_ID_CC:
-        print("Telegram skipped: Credentials not configured.")
-        return
-
-    message = (
-        "⚠️ <b>Screener Session ID Expired!</b>\n\n"
-        "The Screener.in session cookie has expired or is invalid. "
-        "Concall updates cannot be scraped.\n\n"
-        "🛠️ <b>Action Required:</b> Update `sessionid` in your `.env` or GitHub Secrets."
-    )
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN_CC}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID_CC,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    try:
-        requests.post(url, json=payload, timeout=10)
-        print("Session expiry notification sent to Telegram.")
-    except Exception as e:
-        print(f"Failed to send session alert: {e}")
-
 def fetch_concall_announcements():
-    print(f"[{datetime.now()}] Fetching concall updates from Screener...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Fetching concall updates from Screener...")
     try:
-        # allow_redirects=False prevents automatic redirect to /login/
-        response = requests.get(SCREENER_CONCALL_URL, headers=HEADERS, timeout=15, allow_redirects=False)
-        
-        # Check for Session Expiry / Authorization failures
-        if response.status_code in [301, 302, 401, 403] or "login" in response.url.lower():
-            print("❌ Screener Session ID expired or invalid.")
-            send_session_error_alert()
+        response = requests.get(SCREENER_CONCALL_URL, headers=HEADERS, timeout=15)
+
+        is_redirected_to_login = "login" in response.url.lower()
+        contains_login_form = "Log in" in response.text and 'name="username"' in response.text
+
+        if response.status_code in [401, 403] or is_redirected_to_login or contains_login_form:
+            reason = "Screener session expired or login required."
+            print(f"❌ {reason}")
+            send_session_alert(reason)
             return []
 
         if response.status_code != 200:
-            print(f"Failed to fetch page. Status code: {response.status_code}")
+            reason = f"Screener HTTP error status code: {response.status_code}"
+            print(f"❌ {reason}")
+            send_session_alert(reason)
             return []
 
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Additional check: If logged out, Screener serves a login page instead of cards
-        if soup.find('form', action=lambda x: x and 'login' in x):
-            print("❌ Screener Session ID invalid (login form detected).")
-            send_session_error_alert()
-            return []
-
         updates = []
         seen_in_page = set()
 
@@ -170,11 +150,7 @@ def fetch_concall_announcements():
                 h = link_elem['href']
                 pdf_link = h if h.startswith('http') else "https://www.screener.in" + h
 
-            if pdf_link and "screener.in" not in pdf_link:
-                unique_key = pdf_link.strip()
-            else:
-                clean_text = normalize_details(text_block)
-                unique_key = f"{company_name.upper()}_{clean_text[:120]}"
+            unique_key = pdf_link.strip() if (pdf_link and "screener.in" not in pdf_link) else f"{company_name.upper()}_{normalize_details(text_block)[:120]}"
 
             if unique_key in seen_in_page:
                 continue
@@ -190,14 +166,14 @@ def fetch_concall_announcements():
 
         return updates
     except Exception as e:
-        print(f"Error fetching concalls: {e}")
+        err_str = f"Network Exception: {str(e)}"
+        print(f"Error fetching concalls: {err_str}")
+        send_session_alert(err_str)
         return []
-
 
 def run_automation():
     seen_ids = load_last_seen()
-    
-    # Read existing PDF Links from Concalls sheet to prevent duplicates
+
     try:
         concall_sheet = init_google_sheet(CONCALL_TAB)
         recent_rows = concall_sheet.get_all_values()
@@ -217,20 +193,14 @@ def run_automation():
         print("No concall updates parsed.")
         return
 
-    new_items_to_add = []
-    for item in current_updates:
-        if item['signature'] in seen_ids:
-            continue
-        new_items_to_add.append(item)
+    new_items_to_add = [item for item in current_updates if item['signature'] not in seen_ids]
 
     if new_items_to_add:
-        print(f"\nFound {len(new_items_to_add)} new concall announcements to sync...")
+        print(f"\nFound {len(new_items_to_add)} new concall announcements...")
         for item in reversed(new_items_to_add):
             print(f"\n🚨 NEW CONCALL FOUND:\n- Company: {item['company']}\n- Ticker: {item['ticker']}")
-            
+
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            # Use dynamic ROW() reference so inserted rows always point to their own row ticker in Column F
             price_formula = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "price"), "N/A")'
             mcap_formula  = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "marketcap")/10000000, "N/A")'
             pe_formula    = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "pe"), "N/A")'
@@ -238,31 +208,15 @@ def run_automation():
             low_formula   = '=IFERROR(GOOGLEFINANCE(INDIRECT("F" & ROW()), "low52"), "N/A")'
 
             concall_sheet.insert_row([
-                current_time, 
-                item['company'], 
-                item['details'], 
-                item['pdf_link'], 
-                "READY",
-                item['ticker'],
-                price_formula,
-                mcap_formula,
-                pe_formula,
-                high_formula,
-                low_formula
+                current_time, item['company'], item['details'], item['pdf_link'],
+                "READY", item['ticker'], price_formula, mcap_formula, pe_formula, high_formula, low_formula
             ], index=2, value_input_option="USER_ENTERED")
-            
-            send_telegram_alert(
-                item['company'], 
-                item['ticker'], 
-                item['details'], 
-                item['pdf_link']
-            )
-            
+
+            send_telegram_alert(item['company'], item['ticker'], item['details'], item['pdf_link'])
             seen_ids.add(item['signature'])
             save_last_seen(seen_ids)
-            time.sleep(2) 
-        
-        print("\nSynced successfully.")
+            time.sleep(2)
+        print("\nConcalls synced successfully.")
     else:
         print("\nNo new concall updates found.")
 
